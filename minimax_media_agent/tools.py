@@ -62,9 +62,19 @@ class ToolContext:
     output_dir: Path
     http_timeout: float
     pfm: ProxyFileManager
+    # Optional pay-as-you-go / secondary MiniMax API key.  If the main
+    # api_key fails with an error that looks tier/permission-related
+    # (e.g. "token plan not support model"), execute_tool retries the
+    # full tool call with this key.  Blank = no fallback.
+    backup_api_key: str = ""
     # Speech-specific: long audio tasks are asynchronous.
     speech_poll_interval: float = 3.0
     speech_max_wait: float = 600.0
+    # Music-specific: the music API is synchronous, so the entire
+    # generation happens inside a single HTTP call that commonly runs
+    # 30-120 seconds.  HTTP_TIMEOUT (for one-shot REST calls) is too
+    # short; use this dedicated budget instead.
+    music_max_wait: float = 300.0
     # Video-specific: tasks take minutes, poll slower, wait longer.
     video_poll_interval: float = 10.0
     video_max_wait: float = 1800.0
@@ -412,24 +422,27 @@ MINIMAX_TOOLS: list[dict[str, Any]] = [
                     "type": "number",
                     "minimum": 0.5,
                     "maximum": 2.0,
-                    "description": "Speech rate multiplier. Default: 1.",
+                    "description": "Speech rate multiplier, 0.5-2.0. Default: 1.",
                 },
                 "vol": {
                     "type": "number",
-                    "minimum": 0,
+                    "exclusiveMinimum": 0,
                     "maximum": 10,
-                    "description": "Volume 0-10. Default: 1.",
+                    "description": "Volume, greater than 0 and up to 10. Default: 1.",
                 },
                 "pitch": {
-                    "type": "number",
+                    "type": "integer",
                     "minimum": -12,
                     "maximum": 12,
-                    "description": "Pitch shift in semitones (-12 to +12). Default: 0.",
+                    "description": "Pitch shift in semitones (integer, -12 to +12). Default: 0.",
                 },
                 "format": {
                     "type": "string",
-                    "enum": ["mp3", "wav", "flac", "pcm"],
-                    "description": "Output audio format. Default: mp3.",
+                    "enum": ["mp3", "flac", "pcm"],
+                    "description": (
+                        "Output audio format. Default: mp3. "
+                        "(wav is not supported by the async T2A endpoint.)"
+                    ),
                 },
             },
             "required": ["text", "voice_id"],
@@ -611,14 +624,26 @@ MINIMAX_TOOLS: list[dict[str, Any]] = [
                 },
                 "duration": {
                     "type": "integer",
-                    "minimum": 1,
-                    "maximum": 10,
-                    "description": "Video length in seconds. Default: 6.",
+                    "enum": [6, 10],
+                    "description": (
+                        "Video length in seconds. Default: 6. 10 s is only "
+                        "available on Hailuo-2.3 / Hailuo-2.3-Fast / "
+                        "Hailuo-02 at 768P or 512P (the legacy T2V-01 / "
+                        "I2V-01 family and 1080P are 6 s only). Ignored "
+                        "for subject-reference mode."
+                    ),
                 },
                 "resolution": {
                     "type": "string",
-                    "enum": ["512P", "768P", "1080P"],
-                    "description": "Output resolution. Default: 1080P.",
+                    "enum": ["512P", "720P", "768P", "1080P"],
+                    "description": (
+                        "Output resolution. Availability depends on model: "
+                        "Hailuo-2.3 / Hailuo-02 support 768P (default) + "
+                        "1080P (Hailuo-02 also supports 512P); first-last-"
+                        "frame supports 768P + 1080P only; legacy T2V-01 / "
+                        "I2V-01 family is 720P only. Ignored for subject-"
+                        "reference mode."
+                    ),
                 },
                 "first_frame_image": {
                     "type": "string",
@@ -657,12 +682,17 @@ MINIMAX_TOOLS: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 
 
-async def execute_tool(
+async def _execute_tool_once(
     name: str,
     args: dict[str, Any],
     ctx: ToolContext,
 ) -> tuple[str, list[ProxyFile]]:
-    """Route a tool_use invocation to the matching executor."""
+    """Route a tool_use invocation to the matching executor.
+
+    Runs with whatever API key is currently set on ``ctx.api_key`` —
+    :func:`execute_tool` is the public entry point that handles
+    main/backup key fallback.
+    """
     if name == "generate_image":
         return await _generate_image(args, ctx)
     if name == "list_voices":
@@ -678,6 +708,79 @@ async def execute_tool(
     if name == "generate_video":
         return await _generate_video(args, ctx)
     return (f"Error: unknown tool '{name}'", [])
+
+
+# Substrings that, when found in a tool's error text, signal the failure
+# is key/tier/permission related and a different API key might succeed.
+# Match is case-insensitive.
+_BACKUP_KEY_RETRY_HINTS: tuple[str, ...] = (
+    "not support",          # "token plan not support model"
+    "token plan",           # Token Plan restrictions
+    "pay-as-you-go",        # explicit tier mention
+    "permission",           # generic permission denied
+    "insufficient balance", # 1008 on a depleted key
+    " 401",                 # Unauthorized
+    " 403",                 # Forbidden
+    "authentication failed",# 1004
+    "invalid api key",      # 2049
+)
+
+
+def _backup_key_should_help(result_text: str) -> bool:
+    """Return True if *result_text* looks like a failure that might be
+    resolved by switching to a different MiniMax API key."""
+    if not result_text.startswith("Error:"):
+        return False
+    low = result_text.lower()
+    return any(hint in low for hint in _BACKUP_KEY_RETRY_HINTS)
+
+
+async def execute_tool(
+    name: str,
+    args: dict[str, Any],
+    ctx: ToolContext,
+) -> tuple[str, list[ProxyFile]]:
+    """Run a tool with the main API key, falling back to the backup key
+    on retryable failures.
+
+    Retry is attempted only when:
+
+    - A backup key is configured (``ctx.backup_api_key`` is non-empty), and
+    - The main-key result text matches one of the
+      :data:`_BACKUP_KEY_RETRY_HINTS` substrings (tier/permission/auth/
+      balance errors — NOT validation errors like 2013 which no key can
+      fix).
+
+    If the backup also fails retryably, the original main-key error is
+    returned with a note that the backup was tried.
+    """
+    result_text, files = await _execute_tool_once(name, args, ctx)
+
+    if not ctx.backup_api_key or ctx.backup_api_key == ctx.api_key:
+        return result_text, files
+    if not _backup_key_should_help(result_text):
+        return result_text, files
+
+    logger.warning(
+        "Main MiniMax key failed '%s' (%s); retrying with backup key",
+        name, result_text[:160],
+    )
+    original_key = ctx.api_key
+    try:
+        ctx.api_key = ctx.backup_api_key
+        backup_text, backup_files = await _execute_tool_once(name, args, ctx)
+    finally:
+        ctx.api_key = original_key
+
+    if _backup_key_should_help(backup_text):
+        # Both keys rejected; surface the main error so the operator sees
+        # the primary cause, plus a hint that the backup was tried.
+        return (
+            f"{result_text} [Backup key also rejected the request: "
+            f"{backup_text}]",
+            [],
+        )
+    return backup_text, backup_files
 
 
 # ---------------------------------------------------------------------------
@@ -986,11 +1089,14 @@ _SPEECH_DEFAULT_CHANNEL: int = 2
 
 
 def _ext_for_format(fmt: str) -> str:
+    """Normalise a user-supplied speech format to an on-disk extension.
+
+    Async T2A's audio_setting.format enum is {mp3, flac, pcm} — wav is
+    specifically excluded by MiniMax for this endpoint.
+    """
     fmt = (fmt or "mp3").lower()
-    if fmt in ("mp3", "wav", "flac"):
+    if fmt in ("mp3", "flac", "pcm"):
         return fmt
-    if fmt == "pcm":
-        return "pcm"
     return "mp3"
 
 
@@ -1013,12 +1119,27 @@ async def _generate_speech(
     language_boost = str(args.get("language_boost") or "auto")
     fmt = str(args.get("format") or _SPEECH_DEFAULT_FORMAT).lower()
 
-    def _num(key: str, default: float) -> float:
+    # MiniMax's voice_setting schema:
+    #   speed : number, [0.5, 2.0]
+    #   vol   : number, (0, 10]      — exclusive zero
+    #   pitch : integer, [-12, 12]   — NOT a float; API returns 2013 otherwise
+    # Clamp silently: out-of-range values from the LLM would otherwise cause
+    # an "invalid parameter" reject from MiniMax mid-request.
+    def _clamp_float(key: str, default: float, lo: float, hi: float) -> float:
         v = args.get(key)
         try:
-            return float(v) if v is not None else default
+            n = float(v) if v is not None else default
         except (TypeError, ValueError):
             return default
+        return max(lo, min(hi, n))
+
+    def _clamp_int(key: str, default: int, lo: int, hi: int) -> int:
+        v = args.get(key)
+        try:
+            n = int(v) if v is not None else default
+        except (TypeError, ValueError):
+            return default
+        return max(lo, min(hi, n))
 
     payload: dict[str, Any] = {
         "model": model,
@@ -1026,14 +1147,15 @@ async def _generate_speech(
         "language_boost": language_boost,
         "voice_setting": {
             "voice_id": voice_id,
-            "speed": _num("speed", 1.0),
-            "vol": _num("vol", 1.0),
-            "pitch": _num("pitch", 0.0),
+            "speed": _clamp_float("speed", 1.0, 0.5, 2.0),
+            # vol's lower bound is exclusive zero — use a small positive floor.
+            "vol": _clamp_float("vol", 1.0, 0.01, 10.0),
+            "pitch": _clamp_int("pitch", 0, -12, 12),
         },
         "audio_setting": {
             "audio_sample_rate": _SPEECH_DEFAULT_SAMPLE_RATE,
             "bitrate": _SPEECH_DEFAULT_BITRATE,
-            "format": fmt if fmt in ("mp3", "wav", "flac", "pcm") else "mp3",
+            "format": fmt if fmt in ("mp3", "flac", "pcm") else "mp3",
             "channel": _SPEECH_DEFAULT_CHANNEL,
         },
     }
@@ -1330,10 +1452,18 @@ async def _generate_music(
                 [],
             )
 
+    # The schema says audio_setting's sub-fields are optional, but the
+    # working doc example always populates all three.  Send explicit
+    # defaults for robustness; the tool still only accepts `format` from
+    # the LLM (sample_rate / bitrate are not worth exposing).
     payload: dict[str, Any] = {
         "model": model,
         "output_format": "hex",
-        "audio_setting": {"format": fmt},
+        "audio_setting": {
+            "sample_rate": 44100,
+            "bitrate": 256000,
+            "format": fmt,
+        },
     }
     if prompt:
         payload["prompt"] = prompt
@@ -1350,14 +1480,24 @@ async def _generate_music(
             return (f"Error: {exc}", [])
         payload[field_name] = value
 
+    # Music generation is a synchronous blocking call that often takes
+    # 30-120 s; use the dedicated music_max_wait budget rather than
+    # HTTP_TIMEOUT (which is sized for one-shot REST calls).
     url = f"{ctx.api_base}/v1/music_generation"
     try:
-        async with httpx.AsyncClient(timeout=ctx.http_timeout) as client:
+        async with httpx.AsyncClient(timeout=ctx.music_max_wait) as client:
             r = await client.post(
                 url,
                 headers=_auth_headers(ctx.api_key, json_body=True),
                 json=payload,
             )
+    except httpx.TimeoutException:
+        return (
+            f"Error: music_generation timed out after "
+            f"{ctx.music_max_wait:.0f}s. Music can take a few minutes; "
+            "raise MUSIC_MAX_WAIT in config if this keeps happening.",
+            [],
+        )
     except Exception as exc:
         return (f"Error: music_generation request failed: {exc}", [])
     if r.status_code >= 400:
@@ -1472,12 +1612,17 @@ async def _generate_video(
         duration = 6
     resolution = str(args.get("resolution") or "1080P").strip() or "1080P"
 
+    # S2V-01 (subject-reference) schema only accepts
+    # {model, prompt, prompt_optimizer, subject_reference, callback_url} —
+    # sending duration / resolution there trips a 2013 reject.  Text,
+    # image-to-video, and first-last-frame modes all take both fields.
     payload: dict[str, Any] = {
         "prompt": prompt,
         "model": model,
-        "duration": duration,
-        "resolution": resolution,
     }
+    if not has_subject:
+        payload["duration"] = duration
+        payload["resolution"] = resolution
 
     if has_first:
         try:
@@ -1570,8 +1715,14 @@ async def _generate_video(
         kind = "image-to-video"
     else:
         kind = "text-to-video"
+    if has_subject:
+        # S2V-01 didn't get a duration/resolution in the payload; don't
+        # pretend otherwise in the user-facing summary.
+        spec = model
+    else:
+        spec = f"{model} at {resolution}, {duration}s"
     summary = (
-        f"Generated {kind} with {model} at {resolution}, {duration}s "
+        f"Generated {kind} with {spec} "
         f"({len(video_bytes)} bytes): {fname}"
     )
     return (summary, [ProxyFile(**pf_dict)])

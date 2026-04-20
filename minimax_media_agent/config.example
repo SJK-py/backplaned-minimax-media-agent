@@ -1,5 +1,6 @@
 {
   "MINIMAX_API_KEY": "MiniMax Platform API key (required). Get one from https://platform.minimax.io/user-center/basic-information/interface-key",
+  "MINIMAX_BACKUP_API_KEY": "Optional secondary MiniMax API key. If set, any tool call whose error looks key/tier related (e.g. 'token plan not support model', 401/403, 'insufficient balance') is automatically retried with this key. Typical use: main key is a Token Plan, backup is a pay-as-you-go key to cover APIs the Token Plan can't reach. Blank = no fallback.",
   "MINIMAX_API_BASE": "Base URL for the MiniMax API. Global: https://api.minimax.io (default). Mainland China: https://api.minimaxi.com",
   "LLM_MODEL": "Model used for the planning / tool-loop LLM. Options: MiniMax-M2.7 (default), MiniMax-M2.7-highspeed, MiniMax-M2.5, MiniMax-M2.5-highspeed, MiniMax-M2.1, MiniMax-M2.1-highspeed, MiniMax-M2",
   "LLM_MAX_TOKENS": "Maximum tokens per LLM response (default: 4096)",
@@ -9,6 +10,7 @@
   "SPEECH_POLL_INTERVAL": "Seconds between polls of the async T2A task status (default: 3)",
   "SPEECH_MAX_WAIT": "Maximum seconds to wait for an async T2A task to complete before giving up (default: 600 = 10 minutes)",
   "MUSIC_MODEL": "Default MiniMax music model. Options: music-2.6 (default, paid tier, higher RPM), music-2.6-free (free tier, lower RPM), music-cover (paid tier, cover generation), music-cover-free (free tier cover). The LLM may override per call via the tool's `model` parameter. Use the -free variants if your API key is not on a paid plan.",
+  "MUSIC_MAX_WAIT": "Maximum seconds for a single music_generation HTTP call (default: 300 = 5 minutes). Music generation is synchronous and commonly takes 30-120 s, so a longer budget than HTTP_TIMEOUT is needed.",
   "VIDEO_MODEL": "Default MiniMax video model used for text-to-video and image-to-video. Options include MiniMax-Hailuo-2.3 (default), MiniMax-Hailuo-02 (used automatically for first-last-frame mode), S2V-01 (used automatically for subject-reference mode). The LLM may override per call via the tool's `model` parameter.",
   "VIDEO_POLL_INTERVAL": "Seconds between polls of the video_generation task status (default: 10). MiniMax recommends 10s to avoid unnecessary server load.",
   "VIDEO_MAX_WAIT": "Maximum seconds to wait for a video task to complete before giving up (default: 1800 = 30 minutes). Video generation is much slower than audio.",

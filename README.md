@@ -26,11 +26,38 @@ Drop the `minimax_media_agent/` directory into Backplaned's `agents/` folder:
 cp -r minimax_media_agent /path/to/backplaned/agents/
 ```
 
-The router auto-registers any subdirectory of `agents/` that contains an `agent.py` with an `app: FastAPI`. No further wiring needed. Restart the router:
+The router auto-registers any subdirectory of `agents/` that contains an `agent.py` with an `app: FastAPI`. No further wiring needed.
+
+### Bare-metal
 
 ```bash
-./start.sh   # or docker compose restart router
+./start.sh   # or just restart the router process
 ```
+
+### Docker
+
+Backplaned's `docker/docker-compose.yml` declares one bind mount per embedded agent so that each agent's `data/` directory (config + inboxes + output) survives container rebuilds. Add a matching line for `minimax_media_agent` alongside the existing `md_converter` / `web_agent` / etc. entries in the `router` service's `volumes:` block:
+
+```yaml
+services:
+  router:
+    volumes:
+      # ... existing bind mounts for router, core_personal_agent, llm_agent, ...
+      - "${DATA_ROOT:-./data}/minimax_media_agent:/app/agents/minimax_media_agent/data"
+```
+
+Then rebuild + restart:
+
+```bash
+cd /path/to/backplaned/docker
+docker compose up -d --build router
+```
+
+On first boot the `data/` directory under `DATA_ROOT` is empty, so the agent will run with pure code defaults. Set `MINIMAX_API_KEY` (and optionally `MINIMAX_BACKUP_API_KEY`) + populate `ALLOWED_USER_IDS` either through the web-admin config editor or by editing `${DATA_ROOT}/minimax_media_agent/config.json` directly.
+
+Without the bind mount, the config written through the web-admin UI (including your API key) is lost on container rebuild.
+
+### Agent registration
 
 The agent registers with:
 
@@ -46,6 +73,7 @@ Edit `agents/minimax_media_agent/data/config.json` (or via the web-admin UI's co
 | Key | Default | Description |
 |---|---|---|
 | `MINIMAX_API_KEY` | `""` | MiniMax Platform API key. **Required.** Get one from <https://platform.minimax.io/user-center/basic-information/interface-key>. |
+| `MINIMAX_BACKUP_API_KEY` | `""` | Optional secondary API key used as fallback when the main key fails with a tier/permission/auth/balance error. See **Key fallback** below. |
 | `MINIMAX_API_BASE` | `https://api.minimax.io` | Global endpoint (use `https://api.minimaxi.com` for Mainland China). |
 | `LLM_MODEL` | `MiniMax-M2.7` | Model driving the tool-loop planner. Options: `MiniMax-M2.7`, `MiniMax-M2.7-highspeed`, `MiniMax-M2.5`, `MiniMax-M2.5-highspeed`, `MiniMax-M2.1`, `MiniMax-M2.1-highspeed`, `MiniMax-M2`. |
 | `LLM_MAX_TOKENS` | `4096` | Max tokens per LLM turn. |
@@ -55,6 +83,7 @@ Edit `agents/minimax_media_agent/data/config.json` (or via the web-admin UI's co
 | `SPEECH_POLL_INTERVAL` | `3` | Seconds between async T2A status polls. |
 | `SPEECH_MAX_WAIT` | `600` | Max seconds to wait for T2A completion. |
 | `MUSIC_MODEL` | `music-2.6` | Default music model. Use `music-2.6-free` for free-tier API keys; `music-cover[-free]` for covers. |
+| `MUSIC_MAX_WAIT` | `300` | Max seconds for a single (synchronous) music generation HTTP call. |
 | `VIDEO_MODEL` | `MiniMax-Hailuo-2.3` | Default text/image-to-video model. First-last-frame auto-switches to `MiniMax-Hailuo-02`; subject-reference to `S2V-01`. |
 | `VIDEO_POLL_INTERVAL` | `10` | Seconds between video-task status polls. |
 | `VIDEO_MAX_WAIT` | `1800` | Max seconds to wait for video completion. Videos take minutes. |
@@ -66,6 +95,65 @@ Edit `agents/minimax_media_agent/data/config.json` (or via the web-admin UI's co
 | `ALLOWED_USER_IDS` | `[]` | Access allowlist. See **Access control** below. |
 
 Config is re-read on every request, so edits via the web-admin UI take effect without restart.
+
+## Timeout coordination with Backplaned
+
+Media generation — especially video — can take longer than Backplaned's default per-layer timeouts. The full cascade from user request to this agent's generation call is:
+
+| Layer | Setting | Backplaned default | Scope |
+|---|---|---|---|
+| Router HTTP-to-agent | `EMBEDDED_AGENT_TIMEOUT` (env var) | 300 s | Per agent call |
+| Router whole task | `GLOBAL_TIMEOUT_HOURS` (env var) | 1 h | Whole task tree |
+| core_personal_agent overall loop | `CORE_AGENT_TIMEOUT` (config.json) | 290 s | LLM loop |
+| core_personal_agent per-tool | `CORE_TOOL_TIMEOUT` (config.json) | 240 s | Each sub-agent call |
+| minimax_media_agent music | `MUSIC_MAX_WAIT` | 300 s | Synchronous music HTTP |
+| minimax_media_agent video | `VIDEO_MAX_WAIT` | 1800 s | Async video poll cap |
+
+**This agent will exceed the stock defaults for video every time, and can exceed them for music.** The innermost timeout always wins, so if you don't raise the upstream ones, the router / core agent will kill the request before MiniMax finishes the job.
+
+### Suggested values
+
+For a deployment that uses **music + video** end-to-end from a `core_personal_agent` chat:
+
+```jsonc
+// agents/core_personal_agent/data/config.json
+{
+  "CORE_TOOL_TIMEOUT": 1900,   // ≥ VIDEO_MAX_WAIT + small buffer
+  "CORE_AGENT_TIMEOUT": 2000   // ≥ CORE_TOOL_TIMEOUT
+}
+```
+
+Router `EMBEDDED_AGENT_TIMEOUT`:
+
+- **Bare-metal:** set `EMBEDDED_AGENT_TIMEOUT=1900` in the router's environment (e.g. in `start.config` or a systemd unit) before starting.
+- **Docker:** uncomment the optional line in `docker/docker-compose.yml` and raise the default:
+
+  ```yaml
+  services:
+    router:
+      environment:
+        - EMBEDDED_AGENT_TIMEOUT=${EMBEDDED_AGENT_TIMEOUT:-1900}
+  ```
+
+`GLOBAL_TIMEOUT_HOURS` default (1 h) comfortably accommodates a single 30-minute video, so usually no change needed there.
+
+### If you only use music
+
+Bump to ~400 s everywhere instead (`MUSIC_MAX_WAIT` is 300, so 400 leaves headroom):
+
+```jsonc
+// agents/core_personal_agent/data/config.json
+{ "CORE_TOOL_TIMEOUT": 400, "CORE_AGENT_TIMEOUT": 500 }
+```
+
+```yaml
+# docker-compose.yml
+- EMBEDDED_AGENT_TIMEOUT=${EMBEDDED_AGENT_TIMEOUT:-400}
+```
+
+### If the upstream timeouts are fixed
+
+If you can't change core / router settings, cap this agent instead — set `VIDEO_MAX_WAIT` (and/or `MUSIC_MAX_WAIT`) **below** the smallest upstream timeout. The tool will error with a clear "timed out after Ns — raise MUSIC_MAX_WAIT / VIDEO_MAX_WAIT" message instead of the router cutting the connection mid-flight.
 
 ## Access control
 
@@ -84,6 +172,27 @@ MiniMax's media APIs are billed per call, so this agent is **deny-by-default**. 
 `core_personal_agent` injects the session's `user_id` authoritatively whenever a destination agent's `input_schema` declares it, so normal conversation flow Just Works once the user is on the allowlist. Unknown callers get a `403` and a helpful error message telling the operator which file to edit.
 
 Denied calls never reach the MiniMax API — the check fires before any outbound work.
+
+## Key fallback
+
+Some MiniMax APIs are not available to every account tier — a Token Plan key may reject a model that the pay-as-you-go tier happily accepts, and vice versa. Set `MINIMAX_BACKUP_API_KEY` alongside `MINIMAX_API_KEY` and the agent will automatically retry the full tool call with the backup key when the main-key error looks tier-related:
+
+```json
+{
+  "MINIMAX_API_KEY": "sk-primary-token-plan-...",
+  "MINIMAX_BACKUP_API_KEY": "sk-backup-payg-..."
+}
+```
+
+Retry fires only on these signals in the error text (case-insensitive):
+
+- `"not support"` (matches MiniMax's `"token plan not support model"`)
+- `"token plan"` / `"pay-as-you-go"`
+- `"permission"`
+- `"insufficient balance"` (status 1008)
+- `" 401"` / `" 403"` / `"authentication failed"` / `"invalid api key"`
+
+Validation errors (HTTP 2013 "invalid input parameters") are **not** retried — no key change would fix them. If the backup key also fails retryably, the main-key error is returned with a note that the backup was tried, so the operator can see the primary cause.
 
 ## Tool details
 

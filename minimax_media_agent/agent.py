@@ -71,6 +71,12 @@ def _load_config() -> dict[str, Any]:
 
 # Module-level defaults — refreshed from config.json on every request.
 MINIMAX_API_KEY: str = ""
+# Optional secondary MiniMax API key.  If set, the tool dispatcher
+# automatically retries a failed tool call with this key when the failure
+# looks tier/permission/auth/balance related (typical use case: main key
+# is a Token Plan, backup is pay-as-you-go to cover APIs the Token Plan
+# can't reach).
+MINIMAX_BACKUP_API_KEY: str = ""
 MINIMAX_API_BASE: str = "https://api.minimax.io"
 LLM_MODEL: str = "MiniMax-M2.7"
 LLM_MAX_TOKENS: int = 4096
@@ -80,6 +86,7 @@ SPEECH_MODEL: str = "speech-2.8-hd"
 SPEECH_POLL_INTERVAL: float = 3.0
 SPEECH_MAX_WAIT: float = 600.0
 MUSIC_MODEL: str = "music-2.6"
+MUSIC_MAX_WAIT: float = 300.0
 VIDEO_MODEL: str = "MiniMax-Hailuo-2.3"
 VIDEO_POLL_INTERVAL: float = 10.0
 VIDEO_MAX_WAIT: float = 1800.0
@@ -98,9 +105,11 @@ _INBOX_BASE: Path = _AGENT_DIR / "data" / "inboxes"
 
 
 def _refresh_config() -> None:
-    global MINIMAX_API_KEY, MINIMAX_API_BASE, LLM_MODEL, LLM_MAX_TOKENS
+    global MINIMAX_API_KEY, MINIMAX_BACKUP_API_KEY, MINIMAX_API_BASE
+    global LLM_MODEL, LLM_MAX_TOKENS
     global LLM_TEMPERATURE, IMAGE_MODEL, SPEECH_MODEL
-    global SPEECH_POLL_INTERVAL, SPEECH_MAX_WAIT, MUSIC_MODEL, OUTPUT_DIR
+    global SPEECH_POLL_INTERVAL, SPEECH_MAX_WAIT, MUSIC_MODEL, MUSIC_MAX_WAIT
+    global OUTPUT_DIR
     global VIDEO_MODEL, VIDEO_POLL_INTERVAL, VIDEO_MAX_WAIT
     global AGENT_TIMEOUT, HTTP_TIMEOUT, MAX_ITERATIONS, MAX_TOOL_CALLS
     global ALLOWED_USER_IDS
@@ -109,6 +118,7 @@ def _refresh_config() -> None:
     _si = lambda v, d: d if v is None or v == "" else int(v)
     _sf = lambda v, d: d if v is None or v == "" else float(v)
     MINIMAX_API_KEY = _s(cfg.get("MINIMAX_API_KEY"), "")
+    MINIMAX_BACKUP_API_KEY = _s(cfg.get("MINIMAX_BACKUP_API_KEY"), "")
     MINIMAX_API_BASE = _s(cfg.get("MINIMAX_API_BASE"), "https://api.minimax.io").rstrip("/")
     LLM_MODEL = _s(cfg.get("LLM_MODEL"), "MiniMax-M2.7")
     LLM_MAX_TOKENS = _si(cfg.get("LLM_MAX_TOKENS"), 4096)
@@ -118,6 +128,7 @@ def _refresh_config() -> None:
     SPEECH_POLL_INTERVAL = _sf(cfg.get("SPEECH_POLL_INTERVAL"), 3.0)
     SPEECH_MAX_WAIT = _sf(cfg.get("SPEECH_MAX_WAIT"), 600.0)
     MUSIC_MODEL = _s(cfg.get("MUSIC_MODEL"), "music-2.6")
+    MUSIC_MAX_WAIT = _sf(cfg.get("MUSIC_MAX_WAIT"), 300.0)
     VIDEO_MODEL = _s(cfg.get("VIDEO_MODEL"), "MiniMax-Hailuo-2.3")
     VIDEO_POLL_INTERVAL = _sf(cfg.get("VIDEO_POLL_INTERVAL"), 10.0)
     VIDEO_MAX_WAIT = _sf(cfg.get("VIDEO_MAX_WAIT"), 1800.0)
@@ -526,6 +537,7 @@ async def _run(data: dict[str, Any]) -> dict[str, Any]:
     # ------------------------------------------------------------------
     ctx = ToolContext(
         api_key=MINIMAX_API_KEY,
+        backup_api_key=MINIMAX_BACKUP_API_KEY,
         api_base=MINIMAX_API_BASE,
         image_model=IMAGE_MODEL,
         speech_model=SPEECH_MODEL,
@@ -536,6 +548,7 @@ async def _run(data: dict[str, Any]) -> dict[str, Any]:
         pfm=pfm,
         speech_poll_interval=SPEECH_POLL_INTERVAL,
         speech_max_wait=SPEECH_MAX_WAIT,
+        music_max_wait=MUSIC_MAX_WAIT,
         video_poll_interval=VIDEO_POLL_INTERVAL,
         video_max_wait=VIDEO_MAX_WAIT,
         ref_map=ref_map,
