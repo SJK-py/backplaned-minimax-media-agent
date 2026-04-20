@@ -624,14 +624,26 @@ MINIMAX_TOOLS: list[dict[str, Any]] = [
                 },
                 "duration": {
                     "type": "integer",
-                    "minimum": 1,
-                    "maximum": 10,
-                    "description": "Video length in seconds. Default: 6.",
+                    "enum": [6, 10],
+                    "description": (
+                        "Video length in seconds. Default: 6. 10 s is only "
+                        "available on Hailuo-2.3 / Hailuo-2.3-Fast / "
+                        "Hailuo-02 at 768P or 512P (the legacy T2V-01 / "
+                        "I2V-01 family and 1080P are 6 s only). Ignored "
+                        "for subject-reference mode."
+                    ),
                 },
                 "resolution": {
                     "type": "string",
-                    "enum": ["512P", "768P", "1080P"],
-                    "description": "Output resolution. Default: 1080P.",
+                    "enum": ["512P", "720P", "768P", "1080P"],
+                    "description": (
+                        "Output resolution. Availability depends on model: "
+                        "Hailuo-2.3 / Hailuo-02 support 768P (default) + "
+                        "1080P (Hailuo-02 also supports 512P); first-last-"
+                        "frame supports 768P + 1080P only; legacy T2V-01 / "
+                        "I2V-01 family is 720P only. Ignored for subject-"
+                        "reference mode."
+                    ),
                 },
                 "first_frame_image": {
                     "type": "string",
@@ -1600,12 +1612,17 @@ async def _generate_video(
         duration = 6
     resolution = str(args.get("resolution") or "1080P").strip() or "1080P"
 
+    # S2V-01 (subject-reference) schema only accepts
+    # {model, prompt, prompt_optimizer, subject_reference, callback_url} —
+    # sending duration / resolution there trips a 2013 reject.  Text,
+    # image-to-video, and first-last-frame modes all take both fields.
     payload: dict[str, Any] = {
         "prompt": prompt,
         "model": model,
-        "duration": duration,
-        "resolution": resolution,
     }
+    if not has_subject:
+        payload["duration"] = duration
+        payload["resolution"] = resolution
 
     if has_first:
         try:
@@ -1698,8 +1715,14 @@ async def _generate_video(
         kind = "image-to-video"
     else:
         kind = "text-to-video"
+    if has_subject:
+        # S2V-01 didn't get a duration/resolution in the payload; don't
+        # pretend otherwise in the user-facing summary.
+        spec = model
+    else:
+        spec = f"{model} at {resolution}, {duration}s"
     summary = (
-        f"Generated {kind} with {model} at {resolution}, {duration}s "
+        f"Generated {kind} with {spec} "
         f"({len(video_bytes)} bytes): {fname}"
     )
     return (summary, [ProxyFile(**pf_dict)])
