@@ -2,9 +2,15 @@
 agents/minimax_media_agent/tools.py — MiniMax media-generation tool
 definitions and executors.
 
-Currently ships image generation plus the speech suite (voice listing,
-asynchronous T2A, and rapid voice cloning).  Music and video will slot in
-behind the same MINIMAX_TOOLS list + execute_tool dispatcher.
+Tools shipped:
+
+- generate_image                — text-to-image / image-to-image.
+- list_voices / delete_voice    — voice catalogue management.
+- generate_speech               — async long-form T2A.
+- clone_voice                   — quick voice cloning (source audio only).
+- generate_music                — vocal songs, instrumentals, covers.
+- generate_video                — text, image, first-last-frame, subject-
+                                  reference video.
 
 Each executor returns ``(result_text, files)`` where:
 
@@ -121,7 +127,11 @@ async def _mm_upload_file(
 
 
 async def _mm_retrieve_file_bytes(ctx: ToolContext, file_id: str) -> bytes:
-    """GET /v1/files/retrieve_content; return raw audio bytes."""
+    """GET /v1/files/retrieve_content; return raw file bytes.
+
+    Used by the async T2A path.  Video uses /v1/files/retrieve instead —
+    see :func:`_mm_get_file_download_url`.
+    """
     url = f"{ctx.api_base}/v1/files/retrieve_content"
     async with httpx.AsyncClient(timeout=ctx.http_timeout) as client:
         r = await client.get(
@@ -682,7 +692,11 @@ def _file_to_data_uri(path: Path) -> str:
 
 
 def _ref_to_image_file(reference: str, ctx: ToolContext) -> str:
-    """Convert an LLM-supplied reference into MiniMax's ``image_file`` value.
+    """Resolve an LLM-supplied image reference to a value MiniMax accepts.
+
+    Used for every tool parameter that carries an image: image-gen's
+    ``reference_image`` and video's ``first_frame_image``,
+    ``last_frame_image``, ``subject_reference``.
 
     Accepted inputs:
 
@@ -698,13 +712,13 @@ def _ref_to_image_file(reference: str, ctx: ToolContext) -> str:
     """
     reference = reference.strip()
     if not reference:
-        raise ValueError("reference_image is empty")
+        raise ValueError("reference is empty")
     if reference.startswith(("http://", "https://", "data:")):
         return reference
     if reference.startswith(("/", "\\")) or ":" in reference[:3]:
         raise ValueError(
-            "reference_image must be a filename from the Reference Files "
-            "list, or an http(s) URL — absolute paths are not allowed"
+            "reference must be a filename from Reference Files, or an "
+            "http(s) URL — absolute paths are not allowed"
         )
 
     entry = ctx.ref_map.get(reference)
@@ -720,7 +734,7 @@ def _ref_to_image_file(reference: str, ctx: ToolContext) -> str:
         if resolved:
             return _file_to_data_uri(Path(resolved))
 
-    raise ValueError(f"reference_image '{reference}' not found in inbox")
+    raise ValueError(f"'{reference}' not found in inbox")
 
 
 async def _generate_image(
@@ -1402,7 +1416,8 @@ async def _generate_music(
 # ---------------------------------------------------------------------------
 
 
-# (mode_key, default_model, tool-schema label)
+# Mode-specific default models for the three modes that don't use the
+# configured VIDEO_MODEL (which covers text-to-video + image-to-video).
 _VIDEO_MODE_DEFAULT_MODELS: dict[str, str] = {
     "first_last": "MiniMax-Hailuo-02",
     "subject":    "S2V-01",

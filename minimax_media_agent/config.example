@@ -13,7 +13,7 @@
   "VIDEO_POLL_INTERVAL": "Seconds between polls of the video_generation task status (default: 10). MiniMax recommends 10s to avoid unnecessary server load.",
   "VIDEO_MAX_WAIT": "Maximum seconds to wait for a video task to complete before giving up (default: 1800 = 30 minutes). Video generation is much slower than audio.",
   "OUTPUT_DIR": "Directory where generated media files are written. Blank = agents/minimax_media_agent/data/output",
-  "AGENT_TIMEOUT": "Overall timeout (seconds) for a single LLM turn including tool execution (default: 180)",
+  "AGENT_TIMEOUT": "Timeout (seconds) for a single LLM inference call (default: 180). Tool execution is NOT wrapped by this — each tool has its own budget: HTTP_TIMEOUT for one-shot HTTP calls, SPEECH_MAX_WAIT for async T2A polling, VIDEO_MAX_WAIT for video polling.",
   "HTTP_TIMEOUT": "Timeout (seconds) for each outbound MiniMax HTTP call (default: 120)",
   "MAX_ITERATIONS": "Maximum LLM tool-loop iterations (default: 6)",
   "MAX_TOOL_CALLS": "Maximum total tool calls across all iterations (default: 8)",

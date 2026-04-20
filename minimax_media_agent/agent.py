@@ -3,9 +3,13 @@ agents/minimax_media_agent/agent.py — MiniMax media generation embedded agent.
 
 Drop-in embedded agent for Backplaned.  Accepts an LLMData prompt plus
 optional ProxyFile references, runs an LLM tool loop backed by MiniMax's
-Anthropic-compatible endpoint, and invokes MiniMax media-generation APIs
-(image, and in future: speech, video, music) to produce media files that
-are returned as ProxyFile attachments.
+Anthropic-compatible endpoint, and invokes MiniMax's media-generation APIs
+(image, speech + voice cloning, music, video) to produce media files
+returned as ProxyFile attachments.
+
+Access is gated by an ALLOWED_USER_IDS allowlist — the upstream media
+APIs are billed per call, so unknown callers are rejected before any
+work is done.
 
 No additional dependencies — uses only httpx + fastapi, both already
 required by Backplaned itself.
@@ -503,8 +507,11 @@ async def _run(data: dict[str, Any]) -> dict[str, Any]:
             lines.append(f"{i}. {fname}")
         lines.append(
             "Pass one of these filenames (exactly as shown, no paths) via "
-            "the `reference_image` parameter when the user wants visual "
-            "consistency with a reference."
+            "whichever tool parameter fits — `reference_image` for "
+            "image-to-image, `source_audio` for clone_voice, "
+            "`reference_audio` for music covers, "
+            "`first_frame_image` / `last_frame_image` / `subject_reference` "
+            "for video."
         )
         system_parts.append("\n".join(lines))
 
