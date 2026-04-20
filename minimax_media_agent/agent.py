@@ -137,29 +137,71 @@ _refresh_config()
 
 
 # ---------------------------------------------------------------------------
-# Output-directory GC (throttled)
+# Output + inbox GC (throttled)
+# ---------------------------------------------------------------------------
+# Generated media must outlive the agent's response so the router can read
+# the localfile ProxyFiles; incoming reference files must outlive the
+# request so ProxyFileManager can serve them back to the router if asked.
+# Both therefore use age-based sweeps rather than immediate cleanup.
+#
+# Output files: flat directory, remove individual files older than
+# _OUTPUT_MAX_AGE_SECS.  Inbox: per-task subdirectories under _INBOX_BASE;
+# remove an entire subdir (and everything in it) once its newest file is
+# older than _INBOX_MAX_AGE_SECS.
 # ---------------------------------------------------------------------------
 
-_OUTPUT_MAX_AGE_SECS: int = 6 * 3600  # 6 hours
+_OUTPUT_MAX_AGE_SECS: int = 6 * 3600
+_INBOX_MAX_AGE_SECS: int = 6 * 3600
 _CLEANUP_INTERVAL_SECS: float = 300.0
 _last_cleanup: float = 0.0
 
 
-def _cleanup_output_dir() -> None:
+def _newest_mtime(d: Path) -> float:
+    """Return the newest mtime under *d* (recursive), or the dir's own
+    mtime if it's empty.  Used so active task inboxes aren't evicted
+    while files are still being written into them."""
+    newest = d.stat().st_mtime
+    try:
+        for p in d.rglob("*"):
+            if p.is_file():
+                m = p.stat().st_mtime
+                if m > newest:
+                    newest = m
+    except OSError:
+        pass
+    return newest
+
+
+def _cleanup_disk() -> None:
+    """Run both output and inbox GC.  Throttled to once per 5 minutes."""
+    import shutil
     import time
     global _last_cleanup
     now = time.time()
     if now - _last_cleanup < _CLEANUP_INTERVAL_SECS:
         return
     _last_cleanup = now
+
+    # --- output dir: delete stale files ---
     out_dir = Path(OUTPUT_DIR)
-    if not out_dir.is_dir():
-        return
-    threshold = now - _OUTPUT_MAX_AGE_SECS
-    for f in out_dir.iterdir():
-        if f.is_file() and f.stat().st_mtime < threshold:
+    if out_dir.is_dir():
+        threshold = now - _OUTPUT_MAX_AGE_SECS
+        for f in out_dir.iterdir():
+            if f.is_file() and f.stat().st_mtime < threshold:
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+
+    # --- inbox base: delete stale per-task subdirectories ---
+    if _INBOX_BASE.is_dir():
+        threshold = now - _INBOX_MAX_AGE_SECS
+        for sub in _INBOX_BASE.iterdir():
+            if not sub.is_dir():
+                continue
             try:
-                f.unlink()
+                if _newest_mtime(sub) < threshold:
+                    shutil.rmtree(sub, ignore_errors=True)
             except OSError:
                 pass
 
@@ -563,7 +605,7 @@ app = FastAPI(title="MiniMax Media Agent")
 async def receive(request: Request) -> JSONResponse:
     """Called by the router via in-process ASGI transport."""
     _refresh_config()
-    _cleanup_output_dir()
+    _cleanup_disk()
     data = await request.json()
     try:
         result = await _run(data)
