@@ -9,5 +9,6 @@
   "AGENT_TIMEOUT": "Overall timeout (seconds) for a single LLM turn including tool execution (default: 180)",
   "HTTP_TIMEOUT": "Timeout (seconds) for each outbound MiniMax HTTP call (default: 120)",
   "MAX_ITERATIONS": "Maximum LLM tool-loop iterations (default: 6)",
-  "MAX_TOOL_CALLS": "Maximum total tool calls across all iterations (default: 8)"
+  "MAX_TOOL_CALLS": "Maximum total tool calls across all iterations (default: 8)",
+  "ALLOWED_USER_IDS": "Allowlist of user_ids permitted to invoke this agent. MiniMax media APIs are billed per call so access is deny-by-default. Supply a JSON array of user_ids, e.g. [\"alice\", \"bob\"]. Use [\"*\"] to allow any caller that supplies a user_id. Empty list denies everyone."
 }

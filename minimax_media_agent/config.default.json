@@ -9,5 +9,6 @@
     "AGENT_TIMEOUT": 180,
     "HTTP_TIMEOUT": 120,
     "MAX_ITERATIONS": 6,
-    "MAX_TOOL_CALLS": 8
+    "MAX_TOOL_CALLS": 8,
+    "ALLOWED_USER_IDS": []
 }

@@ -20,9 +20,9 @@ import base64
 import logging
 import mimetypes
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import httpx
 
@@ -38,13 +38,22 @@ logger = logging.getLogger("minimax_media_agent.tools")
 
 @dataclass
 class ToolContext:
-    """Dependencies shared by all tool executors."""
+    """Dependencies shared by all tool executors.
+
+    ``ref_map`` maps LLM-visible filenames (as presented in the system
+    prompt) to ``{"local_path": ..., "url": ...}``.  ``inbox_resolver`` is
+    a callable that safely resolves any other filename the LLM provides
+    to an absolute path inside the per-task inbox, or returns None on
+    miss / path-traversal attempt.
+    """
     api_key: str
     api_base: str
     image_model: str
     output_dir: Path
     http_timeout: float
     pfm: ProxyFileManager
+    ref_map: dict[str, dict[str, str]] = field(default_factory=dict)
+    inbox_resolver: Optional[Callable[[str], Optional[str]]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -92,9 +101,9 @@ MINIMAX_TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": (
                         "Optional reference image for subject/character "
-                        "consistency. Accepts either an http(s) URL or the "
-                        "absolute local path of a file that was provided to "
-                        "this agent via the input `files` list."
+                        "consistency. Preferred form: a filename exactly as "
+                        "listed under 'Reference Files' in the system prompt "
+                        "(e.g. 'hero.jpg'). An http(s) URL is also accepted."
                     ),
                 },
             },
@@ -125,22 +134,52 @@ async def execute_tool(
 # ---------------------------------------------------------------------------
 
 
-def _ref_to_image_file(reference: str) -> str:
-    """Convert a reference image (URL or local path) to a value accepted by
-    MiniMax's ``image_file`` field.
+def _file_to_data_uri(path: Path) -> str:
+    mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+    data = path.read_bytes()
+    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
 
-    Http(s) URLs pass through unchanged.  Local paths are base64-encoded
-    into a data URI so the call stays self-contained.
+
+def _ref_to_image_file(reference: str, ctx: ToolContext) -> str:
+    """Convert an LLM-supplied reference into MiniMax's ``image_file`` value.
+
+    Accepted inputs:
+
+    - Http(s) URL or ``data:`` URI — passed through unchanged.
+    - A filename listed in ``ctx.ref_map`` — if that entry has a usable
+      http URL we forward it, otherwise the local file is base64-encoded
+      into a data URI.
+    - Any other bare name — resolved against the per-task inbox (with a
+      path-traversal check) via ``ctx.inbox_resolver``, then data-URI
+      encoded.
+
+    Absolute filesystem paths are rejected: the LLM must use filenames.
     """
     reference = reference.strip()
+    if not reference:
+        raise ValueError("reference_image is empty")
     if reference.startswith(("http://", "https://", "data:")):
         return reference
-    p = Path(reference)
-    if not p.is_file():
-        raise ValueError(f"Reference image not found: {reference}")
-    mime = mimetypes.guess_type(p.name)[0] or "image/jpeg"
-    data = p.read_bytes()
-    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+    if reference.startswith(("/", "\\")) or ":" in reference[:3]:
+        raise ValueError(
+            "reference_image must be a filename from the Reference Files "
+            "list, or an http(s) URL — absolute paths are not allowed"
+        )
+
+    entry = ctx.ref_map.get(reference)
+    if entry:
+        if entry.get("url"):
+            return entry["url"]
+        lp = entry.get("local_path", "")
+        if lp and Path(lp).is_file():
+            return _file_to_data_uri(Path(lp))
+
+    if ctx.inbox_resolver is not None:
+        resolved = ctx.inbox_resolver(reference)
+        if resolved:
+            return _file_to_data_uri(Path(resolved))
+
+    raise ValueError(f"reference_image '{reference}' not found in inbox")
 
 
 async def _generate_image(
@@ -169,7 +208,7 @@ async def _generate_image(
     reference = args.get("reference_image")
     if reference:
         try:
-            image_file = _ref_to_image_file(str(reference))
+            image_file = _ref_to_image_file(str(reference), ctx)
         except Exception as exc:
             return (f"Error: invalid reference_image: {exc}", [])
         payload["subject_reference"] = [{

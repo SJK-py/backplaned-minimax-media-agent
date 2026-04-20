@@ -77,13 +77,20 @@ AGENT_TIMEOUT: float = 180.0
 HTTP_TIMEOUT: float = 120.0
 MAX_ITERATIONS: int = 6
 MAX_TOOL_CALLS: int = 8
+# Allowlist of user_ids permitted to invoke this agent.  Empty = deny all
+# (secure-by-default because the downstream MiniMax media APIs are billed).
+# Use ["*"] to allow any caller that supplies a user_id.
+ALLOWED_USER_IDS: list[str] = []
 ROUTER_URL: str = os.environ.get("ROUTER_URL", "http://localhost:8000")
+
+_INBOX_BASE: Path = _AGENT_DIR / "data" / "inboxes"
 
 
 def _refresh_config() -> None:
     global MINIMAX_API_KEY, MINIMAX_API_BASE, LLM_MODEL, LLM_MAX_TOKENS
     global LLM_TEMPERATURE, IMAGE_MODEL, OUTPUT_DIR
     global AGENT_TIMEOUT, HTTP_TIMEOUT, MAX_ITERATIONS, MAX_TOOL_CALLS
+    global ALLOWED_USER_IDS
     cfg = _load_config()
     _s = lambda v, d: d if v is None or v == "" else str(v)
     _si = lambda v, d: d if v is None or v == "" else int(v)
@@ -99,6 +106,31 @@ def _refresh_config() -> None:
     HTTP_TIMEOUT = _sf(cfg.get("HTTP_TIMEOUT"), 120.0)
     MAX_ITERATIONS = _si(cfg.get("MAX_ITERATIONS"), 6)
     MAX_TOOL_CALLS = _si(cfg.get("MAX_TOOL_CALLS"), 8)
+    raw_allowed = cfg.get("ALLOWED_USER_IDS")
+    if isinstance(raw_allowed, list):
+        ALLOWED_USER_IDS = [str(x).strip() for x in raw_allowed if str(x).strip()]
+    elif isinstance(raw_allowed, str) and raw_allowed.strip():
+        # Comma-separated fallback, for hand-edited configs.
+        ALLOWED_USER_IDS = [x.strip() for x in raw_allowed.split(",") if x.strip()]
+    else:
+        ALLOWED_USER_IDS = []
+
+
+def _is_user_allowed(user_id: str) -> bool:
+    """Return True if *user_id* is permitted to invoke this agent.
+
+    Rules:
+    - An empty allowlist denies everyone (secure default for a billed API).
+    - ``"*"`` in the allowlist allows any non-empty user_id.
+    - Otherwise the user_id must appear exactly in the allowlist.
+    """
+    if not user_id:
+        return False
+    if not ALLOWED_USER_IDS:
+        return False
+    if "*" in ALLOWED_USER_IDS:
+        return True
+    return user_id in ALLOWED_USER_IDS
 
 
 _refresh_config()
@@ -136,7 +168,7 @@ def _cleanup_output_dir() -> None:
 # AgentInfo
 # ---------------------------------------------------------------------------
 
-AGENT_GROUPS = (["tool"], ["tool"])
+AGENT_GROUPS = (["usertool"], ["usertool"])
 
 AGENT_INFO = AgentInfo(
     agent_id=_OUR_AGENT_ID,
@@ -145,12 +177,14 @@ AGENT_INFO = AgentInfo(
         "(and, in future releases, speech / music / video). Put the creative "
         "request in llmdata.prompt, background constraints (style, mood, "
         "aspect ratio hints) in llmdata.context, and optional reference "
-        "images in files. Returns the generated media as ProxyFile "
+        "images in files. The caller's user_id is required — access is "
+        "restricted to an allowlist because the MiniMax media APIs are "
+        "billed per call. Returns the generated media as ProxyFile "
         "attachments plus a short summary of what was produced."
     ),
-    input_schema="llmdata: LLMData, files: Optional[List[ProxyFile]]",
+    input_schema="llmdata: LLMData, files: Optional[List[ProxyFile]], user_id: str",
     output_schema="content: str, files: Optional[List[ProxyFile]]",
-    required_input=["llmdata"],
+    required_input=["llmdata", "user_id"],
 )
 
 
@@ -182,11 +216,42 @@ may be added over time; use whichever tools are available for the request.
 impossible or unsafe.
 - Do NOT make multiple redundant calls for the same asset. If the user asks \
 for "a few variations", pass n>1 to a single tool call.
-- If reference images are supplied via the input `files`, they will be listed \
-in the context. Pass their URLs to the tool's reference-image parameter when \
-the user wants visual consistency with them.
+- If reference images are supplied, they appear in the "Reference Files" \
+section below as **filenames** (e.g. `hero.jpg`). To use one as a reference \
+pass that filename — exactly as shown — via the `reference_image` parameter. \
+Never invent paths or full URLs; the filename alone is resolved internally.
 - Keep your final text short. The generated files speak for themselves.
 """
+
+
+# ---------------------------------------------------------------------------
+# Per-task inbox helpers (mirrors core_personal_agent's session-inbox pattern)
+# ---------------------------------------------------------------------------
+
+
+def _task_inbox(task_id: str) -> Path:
+    """Return the per-task inbox directory, creating it if needed.
+
+    Falls back to a shared ``_default`` bucket if the router didn't supply
+    a task_id so that reference-file fetches still succeed.
+    """
+    safe = task_id if task_id and "/" not in task_id and ".." not in task_id else "_default"
+    p = _INBOX_BASE / safe
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _resolve_inbox_file(filename: str, task_id: str) -> Optional[str]:
+    """Resolve an LLM-supplied filename to an absolute path inside the
+    per-task inbox.  Returns None if the path escapes the inbox.
+    """
+    inbox = _task_inbox(task_id)
+    try:
+        resolved = (inbox / filename).resolve()
+        resolved.relative_to(inbox.resolve())
+    except (ValueError, OSError):
+        return None
+    return str(resolved) if resolved.exists() else None
 
 
 # ---------------------------------------------------------------------------
@@ -241,9 +306,37 @@ async def _call_minimax_llm(
 
 
 async def _run(data: dict[str, Any]) -> dict[str, Any]:
-    task_id: str = data.get("task_id", "")
+    task_id: str = data.get("task_id", "") or ""
     parent_task_id: Optional[str] = data.get("parent_task_id")
     raw_payload: dict[str, Any] = data.get("payload", {})
+
+    # ------------------------------------------------------------------
+    # Access control: require an allowlisted user_id BEFORE any LLM or
+    # media-API work so an unauthorised caller can't burn credits.
+    # ------------------------------------------------------------------
+    user_id = str(raw_payload.get("user_id") or "").strip()
+    if not _is_user_allowed(user_id):
+        reason = (
+            "user_id is required" if not user_id
+            else f"user_id '{user_id}' is not permitted to use this agent"
+        )
+        logger.warning(
+            "minimax_media_agent access denied (task=%s): %s", task_id, reason,
+        )
+        return build_result_request(
+            agent_id=_OUR_AGENT_ID,
+            task_id=task_id,
+            parent_task_id=parent_task_id,
+            status_code=403,
+            output=AgentOutput(
+                content=(
+                    f"Error: access denied — {reason}. "
+                    "Add the user_id to ALLOWED_USER_IDS in "
+                    "agents/minimax_media_agent/data/config.json to grant "
+                    "access."
+                ),
+            ),
+        )
 
     llmdata_raw = raw_payload.get("llmdata")
     if not llmdata_raw or not llmdata_raw.get("prompt"):
@@ -270,10 +363,12 @@ async def _run(data: dict[str, Any]) -> dict[str, Any]:
             ),
         )
 
-    # Per-request ProxyFileManager — keeps inbox/output scoped per invocation
-    # but reuses the shared agent directory.
+    # Per-task inbox — mirrors core_personal_agent's session-scoped pattern so
+    # the LLM only ever sees filenames and internal resolvers perform a
+    # path-traversal check against this directory.
+    inbox_dir = _task_inbox(task_id)
     pfm = ProxyFileManager(
-        inbox_dir=_AGENT_DIR / "data" / "inbox",
+        inbox_dir=inbox_dir,
         router_url=ROUTER_URL,
     )
 
@@ -281,25 +376,25 @@ async def _run(data: dict[str, Any]) -> dict[str, Any]:
     # Resolve inbound reference files
     # ------------------------------------------------------------------
     ref_files_raw: list[dict[str, Any]] = raw_payload.get("files") or []
-    ref_entries: list[dict[str, str]] = []
+    ref_map: dict[str, dict[str, str]] = {}
     for pf in ref_files_raw:
         try:
             local_path = await pfm.fetch(pf, task_id)
         except Exception as exc:
             logger.warning("Failed to fetch reference file %s: %s", pf, exc)
             continue
-        # If the original is already accessible as an http URL, the LLM can
-        # pass it to MiniMax directly.  Otherwise we hand the local path to
-        # the tool and let it encode to a data-URI at call time.
-        original_url = pf.get("path") if pf.get("protocol") == "http" else None
-        ref_entries.append({
-            "filename": Path(local_path).name,
+        filename = Path(local_path).name
+        # If the original is reachable as an http URL, the tool can pass it
+        # straight to MiniMax; otherwise we encode the local file as a data
+        # URI at call time.  Both are keyed by the same LLM-visible filename.
+        original_url = pf.get("path") if pf.get("protocol") == "http" else ""
+        ref_map[filename] = {
             "local_path": local_path,
             "url": original_url or "",
-        })
+        }
 
     # ------------------------------------------------------------------
-    # Build message history
+    # Build message history (LLM sees filenames only — no absolute paths)
     # ------------------------------------------------------------------
     system_parts = [_SYSTEM_PROMPT]
     if llmdata.agent_instruction:
@@ -308,16 +403,13 @@ async def _run(data: dict[str, Any]) -> dict[str, Any]:
         )
     if llmdata.context:
         system_parts.append(f"## Context\n{llmdata.context}")
-    if ref_entries:
-        lines = ["## Reference Files Provided"]
-        for i, e in enumerate(ref_entries, 1):
-            if e["url"]:
-                lines.append(f"{i}. {e['filename']} — url: {e['url']}")
-            else:
-                lines.append(f"{i}. {e['filename']} — local: {e['local_path']}")
+    if ref_map:
+        lines = ["## Reference Files"]
+        for i, (fname, _entry) in enumerate(ref_map.items(), 1):
+            lines.append(f"{i}. {fname}")
         lines.append(
-            "Pass one of these URLs (or local paths) via the "
-            "`reference_image` parameter when the user wants visual "
+            "Pass one of these filenames (exactly as shown, no paths) via "
+            "the `reference_image` parameter when the user wants visual "
             "consistency with a reference."
         )
         system_parts.append("\n".join(lines))
@@ -338,6 +430,8 @@ async def _run(data: dict[str, Any]) -> dict[str, Any]:
         output_dir=Path(OUTPUT_DIR),
         http_timeout=HTTP_TIMEOUT,
         pfm=pfm,
+        ref_map=ref_map,
+        inbox_resolver=lambda fn: _resolve_inbox_file(fn, task_id),
     )
 
     produced_files: list[ProxyFile] = []
