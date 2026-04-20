@@ -174,3 +174,7 @@ minimax_media_agent/
 - [Backplaned agent reference](https://github.com/SJK-py/backplaned/blob/main/docs/agents.md)
 - [Backplaned agent development guide](https://github.com/SJK-py/backplaned/blob/main/docs/agent-development.md)
 - [MiniMax Platform docs](https://platform.minimax.io/docs/)
+
+## License
+
+MIT
