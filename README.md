@@ -26,11 +26,38 @@ Drop the `minimax_media_agent/` directory into Backplaned's `agents/` folder:
 cp -r minimax_media_agent /path/to/backplaned/agents/
 ```
 
-The router auto-registers any subdirectory of `agents/` that contains an `agent.py` with an `app: FastAPI`. No further wiring needed. Restart the router:
+The router auto-registers any subdirectory of `agents/` that contains an `agent.py` with an `app: FastAPI`. No further wiring needed.
+
+### Bare-metal
 
 ```bash
-./start.sh   # or docker compose restart router
+./start.sh   # or just restart the router process
 ```
+
+### Docker
+
+Backplaned's `docker/docker-compose.yml` declares one bind mount per embedded agent so that each agent's `data/` directory (config + inboxes + output) survives container rebuilds. Add a matching line for `minimax_media_agent` alongside the existing `md_converter` / `web_agent` / etc. entries in the `router` service's `volumes:` block:
+
+```yaml
+services:
+  router:
+    volumes:
+      # ... existing bind mounts for router, core_personal_agent, llm_agent, ...
+      - "${DATA_ROOT:-./data}/minimax_media_agent:/app/agents/minimax_media_agent/data"
+```
+
+Then rebuild + restart:
+
+```bash
+cd /path/to/backplaned/docker
+docker compose up -d --build router
+```
+
+On first boot the `data/` directory under `DATA_ROOT` is empty, so the agent will run with pure code defaults. Set `MINIMAX_API_KEY` (and optionally `MINIMAX_BACKUP_API_KEY`) + populate `ALLOWED_USER_IDS` either through the web-admin config editor or by editing `${DATA_ROOT}/minimax_media_agent/config.json` directly.
+
+Without the bind mount, the config written through the web-admin UI (including your API key) is lost on container rebuild.
+
+### Agent registration
 
 The agent registers with:
 
