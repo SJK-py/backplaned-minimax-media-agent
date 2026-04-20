@@ -8,6 +8,7 @@
   "SPEECH_MODEL": "Default MiniMax speech model. Options: speech-2.8-hd (default), speech-2.8-turbo, speech-2.6-hd, speech-2.6-turbo, speech-02-hd, speech-02-turbo. The LLM may override per call via the tool's `model` parameter.",
   "SPEECH_POLL_INTERVAL": "Seconds between polls of the async T2A task status (default: 3)",
   "SPEECH_MAX_WAIT": "Maximum seconds to wait for an async T2A task to complete before giving up (default: 600 = 10 minutes)",
+  "MUSIC_MODEL": "Default MiniMax music model. Options: music-2.6 (default, paid tier, higher RPM), music-2.6-free (free tier, lower RPM), music-cover (paid tier, cover generation), music-cover-free (free tier cover). The LLM may override per call via the tool's `model` parameter. Use the -free variants if your API key is not on a paid plan.",
   "OUTPUT_DIR": "Directory where generated media files are written. Blank = agents/minimax_media_agent/data/output",
   "AGENT_TIMEOUT": "Overall timeout (seconds) for a single LLM turn including tool execution (default: 180)",
   "HTTP_TIMEOUT": "Timeout (seconds) for each outbound MiniMax HTTP call (default: 120)",

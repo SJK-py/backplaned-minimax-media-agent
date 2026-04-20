@@ -8,6 +8,7 @@
     "SPEECH_MODEL": "speech-2.8-hd",
     "SPEECH_POLL_INTERVAL": 3,
     "SPEECH_MAX_WAIT": 600,
+    "MUSIC_MODEL": "music-2.6",
     "OUTPUT_DIR": "",
     "AGENT_TIMEOUT": 180,
     "HTTP_TIMEOUT": 120,

@@ -51,6 +51,7 @@ class ToolContext:
     api_base: str
     image_model: str
     speech_model: str
+    music_model: str
     output_dir: Path
     http_timeout: float
     pfm: ProxyFileManager
@@ -408,6 +409,89 @@ MINIMAX_TOOLS: list[dict[str, Any]] = [
             "required": ["source_audio", "voice_id"],
         },
     },
+    {
+        "name": "generate_music",
+        "description": (
+            "Generate a song (vocal or instrumental) or cover using "
+            "MiniMax's music API. Three modes are selected by `model`:\n"
+            "  - 'music-2.6' / 'music-2.6-free': compose an original song "
+            "from a `prompt` (style/mood) and `lyrics`. Set "
+            "`is_instrumental: true` for a purely instrumental piece "
+            "(then `prompt` is required, `lyrics` ignored). Set "
+            "`lyrics_optimizer: true` to have MiniMax auto-write lyrics "
+            "from the prompt when you don't have any.\n"
+            "  - 'music-cover' / 'music-cover-free': generate a cover of "
+            "`reference_audio` in the style described by `prompt` "
+            "(10-300 chars). `lyrics` is optional — omit to ASR them from "
+            "the reference.\n\n"
+            "Returns a single audio file attached as a ProxyFile. The "
+            "'-free' models are available to all API key holders with "
+            "lower RPM; the paid variants have higher rate limits."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "Description of style / mood / scenario, e.g. "
+                        "'Soulful blues, rainy night, slow tempo'. Up to "
+                        "2000 chars. Required for instrumental and cover "
+                        "modes."
+                    ),
+                },
+                "lyrics": {
+                    "type": "string",
+                    "description": (
+                        "Song lyrics, newline-separated. Supports structure "
+                        "tags [Intro] [Verse] [Pre Chorus] [Chorus] "
+                        "[Interlude] [Bridge] [Outro] [Post Chorus] "
+                        "[Transition] [Break] [Hook] [Build Up] [Inst] "
+                        "[Solo]. Required for vocal music-2.6 songs unless "
+                        "`lyrics_optimizer` is true. Up to 3500 chars."
+                    ),
+                },
+                "model": {
+                    "type": "string",
+                    "enum": [
+                        "music-2.6", "music-2.6-free",
+                        "music-cover", "music-cover-free",
+                    ],
+                    "description": "Music model. Default comes from agent config.",
+                },
+                "is_instrumental": {
+                    "type": "boolean",
+                    "description": (
+                        "Instrumental-only (no vocals). Only valid with "
+                        "music-2.6 / music-2.6-free. Default: false."
+                    ),
+                },
+                "lyrics_optimizer": {
+                    "type": "boolean",
+                    "description": (
+                        "Auto-generate lyrics from `prompt` when `lyrics` "
+                        "is empty. Only valid with music-2.6 / "
+                        "music-2.6-free. Default: false."
+                    ),
+                },
+                "reference_audio": {
+                    "type": "string",
+                    "description": (
+                        "Required for music-cover / music-cover-free. A "
+                        "filename exactly as listed under 'Reference Files' "
+                        "(mp3/wav/flac/m4a, 6 s-6 min, ≤ 50 MB), or an "
+                        "http(s) URL."
+                    ),
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["mp3", "wav", "pcm"],
+                    "description": "Output audio format. Default: mp3.",
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -432,6 +516,8 @@ async def execute_tool(
         return await _generate_speech(args, ctx)
     if name == "clone_voice":
         return await _clone_voice(args, ctx)
+    if name == "generate_music":
+        return await _generate_music(args, ctx)
     return (f"Error: unknown tool '{name}'", [])
 
 
@@ -969,3 +1055,194 @@ async def _clone_voice(
         f"generate_speech.{suffix}"
     )
     return (summary, files)
+
+
+# ---------------------------------------------------------------------------
+# generate_music
+# ---------------------------------------------------------------------------
+
+
+_MUSIC_REF_EXTS: set[str] = {".mp3", ".wav", ".flac", ".m4a"}
+_MUSIC_REF_MAX_BYTES: int = 50 * 1024 * 1024  # 50 MB per MiniMax docs
+
+
+def _resolve_music_reference(
+    reference: str,
+    ctx: ToolContext,
+) -> tuple[str, str]:
+    """Resolve ``reference_audio`` → the MiniMax request field name and value.
+
+    Returns ``("audio_url", url)`` or ``("audio_base64", b64)``.  Raises
+    ValueError on invalid / missing references.
+    """
+    ref = reference.strip()
+    if not ref:
+        raise ValueError("reference_audio is empty")
+    if ref.startswith(("http://", "https://")):
+        return ("audio_url", ref)
+    if ref.startswith(("/", "\\")) or ":" in ref[:3]:
+        raise ValueError(
+            "reference_audio must be a filename from Reference Files, "
+            "or an http(s) URL — absolute paths are not allowed"
+        )
+
+    local_path_str: Optional[str] = None
+    entry = ctx.ref_map.get(ref)
+    if entry:
+        lp = entry.get("local_path", "")
+        if lp and Path(lp).is_file():
+            local_path_str = lp
+    if local_path_str is None and ctx.inbox_resolver is not None:
+        local_path_str = ctx.inbox_resolver(ref)
+    if not local_path_str:
+        raise ValueError(f"reference_audio '{ref}' not found in inbox")
+
+    p = Path(local_path_str)
+    if p.suffix.lower() not in _MUSIC_REF_EXTS:
+        raise ValueError(
+            f"unsupported reference_audio format '{p.suffix}'. "
+            "MiniMax accepts mp3, wav, flac, m4a."
+        )
+    size = p.stat().st_size
+    if size > _MUSIC_REF_MAX_BYTES:
+        raise ValueError(
+            f"reference_audio is {size} bytes; MiniMax limit is 50 MB"
+        )
+    return ("audio_base64", base64.b64encode(p.read_bytes()).decode("ascii"))
+
+
+async def _generate_music(
+    args: dict[str, Any],
+    ctx: ToolContext,
+) -> tuple[str, list[ProxyFile]]:
+    model = str(args.get("model") or ctx.music_model).strip() or ctx.music_model
+    prompt = str(args.get("prompt") or "").strip()
+    lyrics = str(args.get("lyrics") or "").strip()
+    is_instrumental = bool(args.get("is_instrumental"))
+    lyrics_optimizer = bool(args.get("lyrics_optimizer"))
+    fmt = str(args.get("format") or "mp3").lower()
+    if fmt not in ("mp3", "wav", "pcm"):
+        fmt = "mp3"
+    reference = args.get("reference_audio")
+
+    is_cover = model.startswith("music-cover")
+
+    # --- Pre-flight validation (catch the most common misconfigurations
+    # before we send a billed request). ---
+    if is_cover:
+        if not prompt:
+            return (
+                "Error: `prompt` is required for music-cover models "
+                "(10-300 chars describing the target cover style).",
+                [],
+            )
+        if not reference:
+            return (
+                "Error: `reference_audio` is required for music-cover "
+                "models.",
+                [],
+            )
+        if is_instrumental or lyrics_optimizer:
+            return (
+                "Error: `is_instrumental` and `lyrics_optimizer` are only "
+                "valid with music-2.6 / music-2.6-free, not music-cover.",
+                [],
+            )
+    else:
+        if is_instrumental and not prompt:
+            return (
+                "Error: `prompt` is required when `is_instrumental` is true.",
+                [],
+            )
+        if (
+            not is_instrumental
+            and not lyrics
+            and not lyrics_optimizer
+        ):
+            return (
+                "Error: vocal songs need `lyrics`, or set "
+                "`lyrics_optimizer: true` to auto-generate them from "
+                "`prompt`, or set `is_instrumental: true` for a vocal-less "
+                "track.",
+                [],
+            )
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "output_format": "hex",
+        "audio_setting": {"format": fmt},
+    }
+    if prompt:
+        payload["prompt"] = prompt
+    if lyrics:
+        payload["lyrics"] = lyrics
+    if is_instrumental:
+        payload["is_instrumental"] = True
+    if lyrics_optimizer:
+        payload["lyrics_optimizer"] = True
+    if is_cover and reference:
+        try:
+            field_name, value = _resolve_music_reference(str(reference), ctx)
+        except ValueError as exc:
+            return (f"Error: {exc}", [])
+        payload[field_name] = value
+
+    url = f"{ctx.api_base}/v1/music_generation"
+    try:
+        async with httpx.AsyncClient(timeout=ctx.http_timeout) as client:
+            r = await client.post(
+                url,
+                headers=_auth_headers(ctx.api_key, json_body=True),
+                json=payload,
+            )
+    except Exception as exc:
+        return (f"Error: music_generation request failed: {exc}", [])
+    if r.status_code >= 400:
+        return (f"Error: music_generation {r.status_code}: {r.text[:400]}", [])
+    try:
+        body = r.json()
+    except Exception as exc:
+        return (f"Error: unparseable music_generation response: {exc}", [])
+    ok, msg = _base_resp_ok(body)
+    if not ok:
+        return (f"Error: music_generation rejected: {msg or body}", [])
+
+    data = body.get("data") or {}
+    status = data.get("status")
+    if status != 2:
+        return (
+            f"Error: music generation did not complete (status={status}).",
+            [],
+        )
+    audio_hex = data.get("audio")
+    if not audio_hex:
+        return ("Error: music_generation returned no audio payload.", [])
+    try:
+        audio_bytes = bytes.fromhex(audio_hex)
+    except Exception as exc:
+        return (f"Error: could not decode audio hex: {exc}", [])
+
+    ctx.output_dir.mkdir(parents=True, exist_ok=True)
+    fname = f"minimax_music_{uuid.uuid4().hex[:10]}.{fmt}"
+    out_path = ctx.output_dir / fname
+    out_path.write_bytes(audio_bytes)
+    pf_dict = ctx.pfm.resolve(str(out_path.resolve()))
+    if pf_dict is None:
+        return ("Error: failed to register generated music as a ProxyFile.", [])
+
+    extra = body.get("extra_info") or {}
+    duration_ms = extra.get("music_duration")
+    dur_str = ""
+    if isinstance(duration_ms, (int, float)) and duration_ms > 0:
+        dur_str = f", {round(duration_ms / 1000, 1)}s"
+
+    kind = (
+        "cover" if is_cover
+        else "instrumental" if is_instrumental
+        else "song"
+    )
+    summary = (
+        f"Generated {kind} with {model} ({len(audio_bytes)} bytes"
+        f"{dur_str}): {fname}"
+    )
+    return (summary, [ProxyFile(**pf_dict)])

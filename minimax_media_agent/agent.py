@@ -75,6 +75,7 @@ IMAGE_MODEL: str = "image-01"
 SPEECH_MODEL: str = "speech-2.8-hd"
 SPEECH_POLL_INTERVAL: float = 3.0
 SPEECH_MAX_WAIT: float = 600.0
+MUSIC_MODEL: str = "music-2.6"
 OUTPUT_DIR: str = str(_AGENT_DIR / "data" / "output")
 AGENT_TIMEOUT: float = 180.0
 HTTP_TIMEOUT: float = 120.0
@@ -92,7 +93,7 @@ _INBOX_BASE: Path = _AGENT_DIR / "data" / "inboxes"
 def _refresh_config() -> None:
     global MINIMAX_API_KEY, MINIMAX_API_BASE, LLM_MODEL, LLM_MAX_TOKENS
     global LLM_TEMPERATURE, IMAGE_MODEL, SPEECH_MODEL
-    global SPEECH_POLL_INTERVAL, SPEECH_MAX_WAIT, OUTPUT_DIR
+    global SPEECH_POLL_INTERVAL, SPEECH_MAX_WAIT, MUSIC_MODEL, OUTPUT_DIR
     global AGENT_TIMEOUT, HTTP_TIMEOUT, MAX_ITERATIONS, MAX_TOOL_CALLS
     global ALLOWED_USER_IDS
     cfg = _load_config()
@@ -108,6 +109,7 @@ def _refresh_config() -> None:
     SPEECH_MODEL = _s(cfg.get("SPEECH_MODEL"), "speech-2.8-hd")
     SPEECH_POLL_INTERVAL = _sf(cfg.get("SPEECH_POLL_INTERVAL"), 3.0)
     SPEECH_MAX_WAIT = _sf(cfg.get("SPEECH_MAX_WAIT"), 600.0)
+    MUSIC_MODEL = _s(cfg.get("MUSIC_MODEL"), "music-2.6")
     OUTPUT_DIR = _s(cfg.get("OUTPUT_DIR"), str(_AGENT_DIR / "data" / "output"))
     AGENT_TIMEOUT = _sf(cfg.get("AGENT_TIMEOUT"), 180.0)
     HTTP_TIMEOUT = _sf(cfg.get("HTTP_TIMEOUT"), 120.0)
@@ -223,12 +225,13 @@ AGENT_INFO = AgentInfo(
     agent_id=_OUR_AGENT_ID,
     description=(
         "MiniMax media-generation suite. Generates images, synthesises "
-        "speech (with async long-form TTS and quick voice cloning), and — "
-        "in future releases — music and video. Put the creative request "
-        "in llmdata.prompt, background constraints (style, mood, aspect "
-        "ratio hints, target language) in llmdata.context, and any "
-        "reference assets (images for image-to-image, source audio for "
-        "voice cloning) in files. The caller's user_id is required — "
+        "speech (with async long-form TTS and quick voice cloning), and "
+        "composes music (original songs, instrumentals, or covers). Put "
+        "the creative request in llmdata.prompt, background constraints "
+        "(style, mood, aspect ratio hints, target language, tempo, etc.) "
+        "in llmdata.context, and any reference assets (images for image-"
+        "to-image, source audio for voice cloning, reference track for "
+        "music covers) in files. The caller's user_id is required — "
         "access is restricted to an allowlist because the MiniMax media "
         "APIs are billed per call. Returns the generated media as "
         "ProxyFile attachments plus a short summary of what was produced."
@@ -271,8 +274,14 @@ voice_id that you can immediately pass to `generate_speech`.
 - `delete_voice` — remove a cloned / designed voice permanently. Only call \
 when the user explicitly asks to delete a voice; system voices cannot be \
 deleted and the voice_id cannot be reused afterwards.
+- `generate_music` — compose a song, an instrumental, or a cover. Pass \
+style/mood in `prompt` and (for vocal tracks) lyrics in `lyrics`, or set \
+`lyrics_optimizer: true` to have MiniMax auto-write lyrics, or \
+`is_instrumental: true` for a no-vocals track. For covers, use a \
+`music-cover*` model and pass `reference_audio`. Audio returned as a \
+ProxyFile attachment.
 
-Additional tools (music, video) may be added over time.
+Additional tools (video) may be added over time.
 
 ## Rules
 - Call a generation tool at least once unless the request is clearly \
@@ -500,6 +509,7 @@ async def _run(data: dict[str, Any]) -> dict[str, Any]:
         api_base=MINIMAX_API_BASE,
         image_model=IMAGE_MODEL,
         speech_model=SPEECH_MODEL,
+        music_model=MUSIC_MODEL,
         output_dir=Path(OUTPUT_DIR),
         http_timeout=HTTP_TIMEOUT,
         pfm=pfm,
