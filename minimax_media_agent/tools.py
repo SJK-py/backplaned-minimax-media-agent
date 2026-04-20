@@ -28,7 +28,6 @@ from typing import Any, Callable, Optional
 import httpx
 
 from helper import ProxyFile, ProxyFileManager
-from voices import SYSTEM_VOICES, format_voices
 
 logger = logging.getLogger("minimax_media_agent.tools")
 
@@ -60,6 +59,10 @@ class ToolContext:
     speech_max_wait: float = 600.0
     ref_map: dict[str, dict[str, str]] = field(default_factory=dict)
     inbox_resolver: Optional[Callable[[str], Optional[str]]] = None
+    # Voice_ids minted during this request (clone_voice, etc.).  The agent
+    # reads this after the tool loop and surfaces the IDs in its final
+    # message so the user can reuse them later.
+    created_voice_ids: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -217,26 +220,70 @@ MINIMAX_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "list_system_voices",
+        "name": "list_voices",
         "description": (
-            "List MiniMax's built-in system voice IDs.  Call this BEFORE "
-            "generate_speech when you need to pick a voice — the full list "
-            "is long, so keep the `language` filter as specific as possible "
-            "(e.g. 'english', 'korean', 'chinese'). Returns voice_id + "
-            "human name, grouped by language."
+            "List voices available to this MiniMax account via the "
+            "/v1/get_voice API. Use BEFORE generate_speech when picking a "
+            "voice. Covers four categories selectable by `voice_type`:\n"
+            "  - 'system'           : MiniMax's built-in voices.\n"
+            "  - 'voice_cloning'    : voices the user cloned via clone_voice.\n"
+            "  - 'voice_generation' : voices created via voice-design (TTV).\n"
+            "  - 'all'              : everything the account can use.\n\n"
+            "NOTE (MiniMax quirk): a newly cloned voice does NOT appear in "
+            "this list until it has been used for speech synthesis at least "
+            "once. If clone_voice just returned a voice_id, trust that ID "
+            "and call generate_speech with it directly — do not wait for "
+            "it to show up here."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
+                "voice_type": {
+                    "type": "string",
+                    "enum": ["system", "voice_cloning", "voice_generation", "all"],
+                    "description": (
+                        "Which category to list (default: 'system')."
+                    ),
+                },
                 "language": {
                     "type": "string",
                     "description": (
-                        "Case-insensitive language substring filter "
-                        "(e.g. 'english'). Omit to dump the entire catalogue."
+                        "Optional case-insensitive substring filter applied "
+                        "to system voice_id / voice_name only (e.g. "
+                        "'english'). The system voice catalogue is large — "
+                        "use this to keep output focused. Ignored for "
+                        "cloned / generated voices (those are typically "
+                        "short lists already)."
                     ),
                 },
             },
             "required": [],
+        },
+    },
+    {
+        "name": "delete_voice",
+        "description": (
+            "Delete a voice the current account owns. Only voices created "
+            "via clone_voice ('voice_cloning') or voice-design "
+            "('voice_generation') can be deleted — system voices are not "
+            "deletable. WARNING: the voice_id cannot be reused after "
+            "deletion. Only call when the user explicitly asks to remove a "
+            "voice."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "voice_id": {
+                    "type": "string",
+                    "description": "The voice_id to delete.",
+                },
+                "voice_type": {
+                    "type": "string",
+                    "enum": ["voice_cloning", "voice_generation"],
+                    "description": "Category of the voice.",
+                },
+            },
+            "required": ["voice_id", "voice_type"],
         },
     },
     {
@@ -248,8 +295,8 @@ MINIMAX_TOOLS: list[dict[str, Any]] = [
             "audio file is attached to the agent's final response as a "
             "ProxyFile — do NOT ask the user to wait for a URL.\n\n"
             "`voice_id` is REQUIRED. It is either a system voice (see "
-            "list_system_voices) or a custom voice_id returned by "
-            "clone_voice."
+            "list_voices with voice_type='system') or a custom voice_id "
+            "returned by clone_voice."
         ),
         "input_schema": {
             "type": "object",
@@ -261,7 +308,7 @@ MINIMAX_TOOLS: list[dict[str, Any]] = [
                 "voice_id": {
                     "type": "string",
                     "description": (
-                        "MiniMax voice_id. Use list_system_voices to pick a "
+                        "MiniMax voice_id. Use list_voices to pick a "
                         "built-in one, or pass a voice_id returned from a "
                         "previous clone_voice call."
                     ),
@@ -377,8 +424,10 @@ async def execute_tool(
     """Route a tool_use invocation to the matching executor."""
     if name == "generate_image":
         return await _generate_image(args, ctx)
-    if name == "list_system_voices":
-        return await _list_system_voices(args, ctx)
+    if name == "list_voices":
+        return await _list_voices(args, ctx)
+    if name == "delete_voice":
+        return await _delete_voice(args, ctx)
     if name == "generate_speech":
         return await _generate_speech(args, ctx)
     if name == "clone_voice":
@@ -530,16 +579,149 @@ async def _generate_image(
 
 
 # ---------------------------------------------------------------------------
-# list_system_voices
+# list_voices / delete_voice
 # ---------------------------------------------------------------------------
 
 
-async def _list_system_voices(
+_VOICE_CATEGORY_LABELS: dict[str, str] = {
+    "system_voice": "System voices",
+    "voice_cloning": "Cloned voices",
+    "voice_generation": "Voice-design (TTV) voices",
+}
+
+
+def _format_voice_list(
+    body: dict[str, Any],
+    language: Optional[str],
+) -> str:
+    """Render the /v1/get_voice response as grouped markdown.
+
+    Applies the optional ``language`` substring filter to system voices
+    only (cloned / generated voices carry no language metadata).
+    """
+    needle = (language or "").strip().lower()
+    sections: list[str] = []
+    total = 0
+
+    for key, label in _VOICE_CATEGORY_LABELS.items():
+        entries = body.get(key) or []
+        if not isinstance(entries, list) or not entries:
+            continue
+        rows: list[str] = []
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            vid = str(e.get("voice_id") or "").strip()
+            if not vid:
+                continue
+            name = str(e.get("voice_name") or "").strip()
+            descs = e.get("description") or []
+            desc = (
+                "; ".join(str(d) for d in descs if d).strip()
+                if isinstance(descs, list) else str(descs or "").strip()
+            )
+            created = str(e.get("created_time") or "").strip()
+
+            if needle and key == "system_voice":
+                haystack = f"{vid} {name}".lower()
+                if needle not in haystack:
+                    continue
+
+            parts: list[str] = [f"`{vid}`"]
+            if name:
+                parts.append(f"— {name}")
+            if desc:
+                parts.append(f"({desc})")
+            if created:
+                parts.append(f"[created {created}]")
+            rows.append("- " + " ".join(parts))
+        if rows:
+            sections.append(f"## {label}\n" + "\n".join(rows))
+            total += len(rows)
+
+    if total == 0:
+        if language:
+            return f"No voices matched '{language}'."
+        return "No voices available for this account."
+    header = (
+        f"{total} voice(s) "
+        + (f"matching '{language}' " if language else "")
+        + "available:"
+    )
+    return header + "\n\n" + "\n\n".join(sections)
+
+
+async def _list_voices(
     args: dict[str, Any],
     ctx: ToolContext,
 ) -> tuple[str, list[ProxyFile]]:
+    voice_type = str(args.get("voice_type") or "system").strip().lower()
+    if voice_type not in ("system", "voice_cloning", "voice_generation", "all"):
+        return (
+            f"Error: voice_type must be one of system, voice_cloning, "
+            f"voice_generation, all (got '{voice_type}').",
+            [],
+        )
     language = args.get("language")
-    return (format_voices(str(language) if language else None), [])
+    url = f"{ctx.api_base}/v1/get_voice"
+    try:
+        async with httpx.AsyncClient(timeout=ctx.http_timeout) as client:
+            r = await client.post(
+                url,
+                headers=_auth_headers(ctx.api_key, json_body=True),
+                json={"voice_type": voice_type},
+            )
+    except Exception as exc:
+        return (f"Error: get_voice request failed: {exc}", [])
+    if r.status_code >= 400:
+        return (f"Error: get_voice {r.status_code}: {r.text[:400]}", [])
+    try:
+        body = r.json()
+    except Exception as exc:
+        return (f"Error: unparseable get_voice response: {exc}", [])
+    ok, msg = _base_resp_ok(body)
+    if not ok:
+        return (f"Error: get_voice rejected: {msg or body}", [])
+    return (
+        _format_voice_list(body, str(language) if language else None),
+        [],
+    )
+
+
+async def _delete_voice(
+    args: dict[str, Any],
+    ctx: ToolContext,
+) -> tuple[str, list[ProxyFile]]:
+    voice_id = str(args.get("voice_id", "")).strip()
+    voice_type = str(args.get("voice_type", "")).strip().lower()
+    if not voice_id:
+        return ("Error: voice_id is required", [])
+    if voice_type not in ("voice_cloning", "voice_generation"):
+        return (
+            "Error: voice_type must be 'voice_cloning' or 'voice_generation'. "
+            "System voices cannot be deleted.",
+            [],
+        )
+    url = f"{ctx.api_base}/v1/delete_voice"
+    try:
+        async with httpx.AsyncClient(timeout=ctx.http_timeout) as client:
+            r = await client.post(
+                url,
+                headers=_auth_headers(ctx.api_key, json_body=True),
+                json={"voice_id": voice_id, "voice_type": voice_type},
+            )
+    except Exception as exc:
+        return (f"Error: delete_voice request failed: {exc}", [])
+    if r.status_code >= 400:
+        return (f"Error: delete_voice {r.status_code}: {r.text[:400]}", [])
+    try:
+        body = r.json()
+    except Exception as exc:
+        return (f"Error: unparseable delete_voice response: {exc}", [])
+    ok, msg = _base_resp_ok(body)
+    if not ok:
+        return (f"Error: delete_voice rejected: {msg or body}", [])
+    return (f"Deleted voice_id='{voice_id}' ({voice_type}).", [])
 
 
 # ---------------------------------------------------------------------------
@@ -573,8 +755,8 @@ async def _generate_speech(
         return ("Error: text is required", [])
     if not voice_id:
         return (
-            "Error: voice_id is required. Call list_system_voices first "
-            "or pass a voice_id returned from clone_voice.",
+            "Error: voice_id is required. Call list_voices first or pass "
+            "a voice_id returned from clone_voice.",
             [],
         )
 
@@ -751,6 +933,12 @@ async def _clone_voice(
     ok, msg = _base_resp_ok(body)
     if not ok:
         return (f"Error: voice_clone rejected: {msg or body}", [])
+
+    # Record the new voice_id so the agent can surface it in the final
+    # summary (the API won't list it via /v1/get_voice until it's been
+    # used at least once, so the caller's only record is what we return).
+    if voice_id not in ctx.created_voice_ids:
+        ctx.created_voice_ids.append(voice_id)
 
     # 3. Optionally attach preview audio.  MiniMax returns a public URL in
     # ``demo_audio`` when ``text`` was supplied.

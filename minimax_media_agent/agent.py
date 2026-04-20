@@ -260,15 +260,17 @@ is returned separately.
 
 ## Tools
 - `generate_image` — text-to-image or image-to-image.
-- `list_system_voices` — return MiniMax built-in voice IDs, optionally \
-filtered by language substring. Call BEFORE `generate_speech` when you \
-need to pick a voice; the full catalogue is long, so filter by the target \
-language (e.g. 'english', 'korean') rather than dumping everything.
+- `list_voices` — list voices the account can use (system / cloned / \
+generated / all), optionally filtered by language substring for system \
+voices. Call BEFORE `generate_speech` when picking a voice.
 - `generate_speech` — async long-form text-to-speech. Requires a `voice_id` \
 (system or cloned). Returns audio as a ProxyFile attachment.
 - `clone_voice` — quick voice cloning from a user-supplied source audio \
-file. Only source audio is used (no example/prompt audio). Returns the new \
+file. Only source audio is used (no example/prompt audio). Returns a new \
 voice_id that you can immediately pass to `generate_speech`.
+- `delete_voice` — remove a cloned / designed voice permanently. Only call \
+when the user explicitly asks to delete a voice; system voices cannot be \
+deleted and the voice_id cannot be reused afterwards.
 
 Additional tools (music, video) may be added over time.
 
@@ -282,9 +284,14 @@ the "Reference Files" section below as **filenames** (e.g. `hero.jpg`, \
 `sample.mp3`). To use one, pass that filename — exactly as shown — via the \
 appropriate parameter (`reference_image`, `source_audio`, …). Never invent \
 paths or full URLs; the filename alone is resolved internally.
-- For speech: pick a voice with `list_system_voices` before calling \
+- For speech: pick a voice with `list_voices` before calling \
 `generate_speech`, unless the user already provided a voice_id or asked \
-you to clone one.
+you to clone one. A freshly cloned voice does NOT appear in `list_voices` \
+until it has been used once — trust the ID that `clone_voice` returns and \
+proceed directly to `generate_speech`.
+- Whenever `clone_voice` (or any future voice-creating tool) succeeds, \
+mention the new voice_id explicitly in your final summary so the user can \
+reuse it later.
 - Keep your final text short. The generated files speak for themselves.
 """
 
@@ -607,6 +614,19 @@ async def _run(data: dict[str, Any]) -> dict[str, Any]:
             summary = f"Generated {len(produced_files)} media file(s)."
         else:
             summary = "No media was generated."
+
+    # Always surface newly minted voice_ids — a cloned voice does not appear
+    # in /v1/get_voice until it has been used, so this response is the only
+    # place the caller will see the ID until then.
+    if ctx.created_voice_ids:
+        lines = [
+            "",
+            "**New voice IDs created in this request "
+            "(pass to generate_speech to use, or delete_voice to remove):**",
+        ]
+        for vid in ctx.created_voice_ids:
+            lines.append(f"- `{vid}`")
+        summary = summary + "\n" + "\n".join(lines)
 
     return build_result_request(
         agent_id=_OUR_AGENT_ID,
