@@ -72,6 +72,9 @@ LLM_MODEL: str = "MiniMax-M2.7"
 LLM_MAX_TOKENS: int = 4096
 LLM_TEMPERATURE: float = 1.0
 IMAGE_MODEL: str = "image-01"
+SPEECH_MODEL: str = "speech-2.8-hd"
+SPEECH_POLL_INTERVAL: float = 3.0
+SPEECH_MAX_WAIT: float = 600.0
 OUTPUT_DIR: str = str(_AGENT_DIR / "data" / "output")
 AGENT_TIMEOUT: float = 180.0
 HTTP_TIMEOUT: float = 120.0
@@ -88,7 +91,8 @@ _INBOX_BASE: Path = _AGENT_DIR / "data" / "inboxes"
 
 def _refresh_config() -> None:
     global MINIMAX_API_KEY, MINIMAX_API_BASE, LLM_MODEL, LLM_MAX_TOKENS
-    global LLM_TEMPERATURE, IMAGE_MODEL, OUTPUT_DIR
+    global LLM_TEMPERATURE, IMAGE_MODEL, SPEECH_MODEL
+    global SPEECH_POLL_INTERVAL, SPEECH_MAX_WAIT, OUTPUT_DIR
     global AGENT_TIMEOUT, HTTP_TIMEOUT, MAX_ITERATIONS, MAX_TOOL_CALLS
     global ALLOWED_USER_IDS
     cfg = _load_config()
@@ -101,6 +105,9 @@ def _refresh_config() -> None:
     LLM_MAX_TOKENS = _si(cfg.get("LLM_MAX_TOKENS"), 4096)
     LLM_TEMPERATURE = _sf(cfg.get("LLM_TEMPERATURE"), 1.0)
     IMAGE_MODEL = _s(cfg.get("IMAGE_MODEL"), "image-01")
+    SPEECH_MODEL = _s(cfg.get("SPEECH_MODEL"), "speech-2.8-hd")
+    SPEECH_POLL_INTERVAL = _sf(cfg.get("SPEECH_POLL_INTERVAL"), 3.0)
+    SPEECH_MAX_WAIT = _sf(cfg.get("SPEECH_MAX_WAIT"), 600.0)
     OUTPUT_DIR = _s(cfg.get("OUTPUT_DIR"), str(_AGENT_DIR / "data" / "output"))
     AGENT_TIMEOUT = _sf(cfg.get("AGENT_TIMEOUT"), 180.0)
     HTTP_TIMEOUT = _sf(cfg.get("HTTP_TIMEOUT"), 120.0)
@@ -215,14 +222,16 @@ AGENT_GROUPS = (["usertool"], ["usertool"])
 AGENT_INFO = AgentInfo(
     agent_id=_OUR_AGENT_ID,
     description=(
-        "MiniMax media-generation suite. Generates images from a text prompt "
-        "(and, in future releases, speech / music / video). Put the creative "
-        "request in llmdata.prompt, background constraints (style, mood, "
-        "aspect ratio hints) in llmdata.context, and optional reference "
-        "images in files. The caller's user_id is required — access is "
-        "restricted to an allowlist because the MiniMax media APIs are "
-        "billed per call. Returns the generated media as ProxyFile "
-        "attachments plus a short summary of what was produced."
+        "MiniMax media-generation suite. Generates images, synthesises "
+        "speech (with async long-form TTS and quick voice cloning), and — "
+        "in future releases — music and video. Put the creative request "
+        "in llmdata.prompt, background constraints (style, mood, aspect "
+        "ratio hints, target language) in llmdata.context, and any "
+        "reference assets (images for image-to-image, source audio for "
+        "voice cloning) in files. The caller's user_id is required — "
+        "access is restricted to an allowlist because the MiniMax media "
+        "APIs are billed per call. Returns the generated media as "
+        "ProxyFile attachments plus a short summary of what was produced."
     ),
     input_schema="llmdata: LLMData, files: Optional[List[ProxyFile]], user_id: str",
     output_schema="content: str, files: Optional[List[ProxyFile]]",
@@ -250,18 +259,32 @@ what you produced. Do NOT re-describe the prompt verbatim — the media itself \
 is returned separately.
 
 ## Tools
-You currently have image generation. Additional tools (speech, music, video) \
-may be added over time; use whichever tools are available for the request.
+- `generate_image` — text-to-image or image-to-image.
+- `list_system_voices` — return MiniMax built-in voice IDs, optionally \
+filtered by language substring. Call BEFORE `generate_speech` when you \
+need to pick a voice; the full catalogue is long, so filter by the target \
+language (e.g. 'english', 'korean') rather than dumping everything.
+- `generate_speech` — async long-form text-to-speech. Requires a `voice_id` \
+(system or cloned). Returns audio as a ProxyFile attachment.
+- `clone_voice` — quick voice cloning from a user-supplied source audio \
+file. Only source audio is used (no example/prompt audio). Returns the new \
+voice_id that you can immediately pass to `generate_speech`.
+
+Additional tools (music, video) may be added over time.
 
 ## Rules
 - Call a generation tool at least once unless the request is clearly \
 impossible or unsafe.
 - Do NOT make multiple redundant calls for the same asset. If the user asks \
-for "a few variations", pass n>1 to a single tool call.
-- If reference images are supplied, they appear in the "Reference Files" \
-section below as **filenames** (e.g. `hero.jpg`). To use one as a reference \
-pass that filename — exactly as shown — via the `reference_image` parameter. \
-Never invent paths or full URLs; the filename alone is resolved internally.
+for "a few variations", pass n>1 to a single image tool call.
+- Reference files — including source audio for voice cloning — appear in \
+the "Reference Files" section below as **filenames** (e.g. `hero.jpg`, \
+`sample.mp3`). To use one, pass that filename — exactly as shown — via the \
+appropriate parameter (`reference_image`, `source_audio`, …). Never invent \
+paths or full URLs; the filename alone is resolved internally.
+- For speech: pick a voice with `list_system_voices` before calling \
+`generate_speech`, unless the user already provided a voice_id or asked \
+you to clone one.
 - Keep your final text short. The generated files speak for themselves.
 """
 
@@ -469,9 +492,12 @@ async def _run(data: dict[str, Any]) -> dict[str, Any]:
         api_key=MINIMAX_API_KEY,
         api_base=MINIMAX_API_BASE,
         image_model=IMAGE_MODEL,
+        speech_model=SPEECH_MODEL,
         output_dir=Path(OUTPUT_DIR),
         http_timeout=HTTP_TIMEOUT,
         pfm=pfm,
+        speech_poll_interval=SPEECH_POLL_INTERVAL,
+        speech_max_wait=SPEECH_MAX_WAIT,
         ref_map=ref_map,
         inbox_resolver=lambda fn: _resolve_inbox_file(fn, task_id),
     )
