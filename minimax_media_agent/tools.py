@@ -52,12 +52,16 @@ class ToolContext:
     image_model: str
     speech_model: str
     music_model: str
+    video_model: str
     output_dir: Path
     http_timeout: float
     pfm: ProxyFileManager
     # Speech-specific: long audio tasks are asynchronous.
     speech_poll_interval: float = 3.0
     speech_max_wait: float = 600.0
+    # Video-specific: tasks take minutes, poll slower, wait longer.
+    video_poll_interval: float = 10.0
+    video_max_wait: float = 1800.0
     ref_map: dict[str, dict[str, str]] = field(default_factory=dict)
     inbox_resolver: Optional[Callable[[str], Optional[str]]] = None
     # Voice_ids minted during this request (clone_voice, etc.).  The agent
@@ -164,6 +168,67 @@ async def _mm_poll_async_t2a(ctx: ToolContext, task_id: str) -> str:
                     f"task {task_id} timed out after {ctx.speech_max_wait}s"
                 )
             await asyncio.sleep(ctx.speech_poll_interval)
+
+
+async def _mm_poll_video_task(ctx: ToolContext, task_id: str) -> str:
+    """Poll /v1/query/video_generation until the task succeeds or fails.
+
+    Uses longer interval / cap than the speech poller because video
+    generation is measured in minutes, not seconds.
+    """
+    url = f"{ctx.api_base}/v1/query/video_generation"
+    deadline = asyncio.get_running_loop().time() + ctx.video_max_wait
+    async with httpx.AsyncClient(timeout=ctx.http_timeout) as client:
+        while True:
+            r = await client.get(
+                url,
+                headers=_auth_headers(ctx.api_key),
+                params={"task_id": task_id},
+            )
+            if r.status_code >= 400:
+                raise RuntimeError(
+                    f"poll failed {r.status_code}: {r.text[:300]}"
+                )
+            body = r.json()
+            status = str(body.get("status") or "").strip()
+            if status == "Success":
+                file_id = body.get("file_id")
+                if not file_id:
+                    raise RuntimeError(
+                        f"video task {task_id} success but no file_id: {body}"
+                    )
+                return str(file_id)
+            if status == "Fail":
+                err = body.get("error_message") or body
+                raise RuntimeError(f"video task {task_id} failed: {err}")
+            if asyncio.get_running_loop().time() >= deadline:
+                raise RuntimeError(
+                    f"video task {task_id} timed out after {ctx.video_max_wait}s"
+                )
+            await asyncio.sleep(ctx.video_poll_interval)
+
+
+async def _mm_get_file_download_url(ctx: ToolContext, file_id: str) -> str:
+    """GET /v1/files/retrieve; return the file's download URL.
+
+    This is the JSON-wrapped retrieval path used by the video workflow,
+    distinct from /v1/files/retrieve_content which streams bytes
+    directly (used for async T2A).
+    """
+    url = f"{ctx.api_base}/v1/files/retrieve"
+    async with httpx.AsyncClient(timeout=ctx.http_timeout) as client:
+        r = await client.get(
+            url,
+            headers=_auth_headers(ctx.api_key),
+            params={"file_id": file_id},
+        )
+    if r.status_code >= 400:
+        raise RuntimeError(f"retrieve failed {r.status_code}: {r.text[:300]}")
+    body = r.json()
+    download_url = (body.get("file") or {}).get("download_url")
+    if not download_url:
+        raise RuntimeError(f"retrieve returned no download_url: {body}")
+    return str(download_url)
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +557,88 @@ MINIMAX_TOOLS: list[dict[str, Any]] = [
             "required": [],
         },
     },
+    {
+        "name": "generate_video",
+        "description": (
+            "Generate a video with MiniMax. Four modes, auto-selected by "
+            "which parameters you pass:\n"
+            "  - text-to-video: `prompt` only.\n"
+            "  - image-to-video: `prompt` + `first_frame_image`.\n"
+            "  - first-last-frame: `prompt` + `first_frame_image` + "
+            "`last_frame_image`.\n"
+            "  - subject-reference: `prompt` + `subject_reference` "
+            "(one face photo; keeps the subject consistent across the "
+            "clip).\n\n"
+            "Each mode has a default model:\n"
+            "  - text / image-to-video: MiniMax-Hailuo-2.3\n"
+            "  - first-last-frame    : MiniMax-Hailuo-02\n"
+            "  - subject-reference   : S2V-01\n"
+            "Override via `model` only if you know the specific model you "
+            "want. Video generation is asynchronous and typically takes "
+            "1-5 minutes; the agent polls until done and attaches the "
+            "resulting mp4 as a ProxyFile — do NOT warn the user that a "
+            "URL is coming later."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "What should happen in the video. For image-to-"
+                        "video, describe how the scene evolves from the "
+                        "first frame. Some models support camera hints "
+                        "like [pan], [zoom], [static] after key phrases."
+                    ),
+                },
+                "model": {
+                    "type": "string",
+                    "description": (
+                        "Optional model override, e.g. 'MiniMax-Hailuo-2.3', "
+                        "'MiniMax-Hailuo-02', 'S2V-01'. Leave unset to pick "
+                        "the default for the inferred mode."
+                    ),
+                },
+                "duration": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "description": "Video length in seconds. Default: 6.",
+                },
+                "resolution": {
+                    "type": "string",
+                    "enum": ["512P", "768P", "1080P"],
+                    "description": "Output resolution. Default: 1080P.",
+                },
+                "first_frame_image": {
+                    "type": "string",
+                    "description": (
+                        "Filename from Reference Files (jpg/png/webp), or "
+                        "an http(s) URL. Triggers image-to-video mode "
+                        "(plus first-last-frame if `last_frame_image` is "
+                        "also set)."
+                    ),
+                },
+                "last_frame_image": {
+                    "type": "string",
+                    "description": (
+                        "Filename or URL of the desired ending frame. "
+                        "Requires `first_frame_image`; triggers first-last-"
+                        "frame mode."
+                    ),
+                },
+                "subject_reference": {
+                    "type": "string",
+                    "description": (
+                        "One face photo for subject-reference mode. "
+                        "Filename from Reference Files or http(s) URL. "
+                        "Cannot be combined with first/last_frame_image."
+                    ),
+                },
+            },
+            "required": ["prompt"],
+        },
+    },
 ]
 
 
@@ -518,6 +665,8 @@ async def execute_tool(
         return await _clone_voice(args, ctx)
     if name == "generate_music":
         return await _generate_music(args, ctx)
+    if name == "generate_video":
+        return await _generate_video(args, ctx)
     return (f"Error: unknown tool '{name}'", [])
 
 
@@ -1244,5 +1393,170 @@ async def _generate_music(
     summary = (
         f"Generated {kind} with {model} ({len(audio_bytes)} bytes"
         f"{dur_str}): {fname}"
+    )
+    return (summary, [ProxyFile(**pf_dict)])
+
+
+# ---------------------------------------------------------------------------
+# generate_video
+# ---------------------------------------------------------------------------
+
+
+# (mode_key, default_model, tool-schema label)
+_VIDEO_MODE_DEFAULT_MODELS: dict[str, str] = {
+    "first_last": "MiniMax-Hailuo-02",
+    "subject":    "S2V-01",
+    "default":    "MiniMax-Hailuo-2.3",  # text + image-to-video
+}
+
+
+async def _generate_video(
+    args: dict[str, Any],
+    ctx: ToolContext,
+) -> tuple[str, list[ProxyFile]]:
+    prompt = str(args.get("prompt", "")).strip()
+    if not prompt:
+        return ("Error: prompt is required", [])
+
+    first_frame = args.get("first_frame_image")
+    last_frame = args.get("last_frame_image")
+    subject_ref = args.get("subject_reference")
+    has_first = bool(first_frame)
+    has_last = bool(last_frame)
+    has_subject = bool(subject_ref)
+
+    # --- Mode validation ---
+    if has_subject and (has_first or has_last):
+        return (
+            "Error: subject_reference cannot be combined with "
+            "first_frame_image / last_frame_image.",
+            [],
+        )
+    if has_last and not has_first:
+        return (
+            "Error: last_frame_image requires first_frame_image (first-"
+            "last-frame mode).",
+            [],
+        )
+
+    # Resolve model: explicit override > per-mode default.
+    model_override = str(args.get("model") or "").strip()
+    if model_override:
+        model = model_override
+    else:
+        if has_subject:
+            model = _VIDEO_MODE_DEFAULT_MODELS["subject"]
+        elif has_last:
+            model = _VIDEO_MODE_DEFAULT_MODELS["first_last"]
+        else:
+            model = ctx.video_model or _VIDEO_MODE_DEFAULT_MODELS["default"]
+
+    try:
+        duration = int(args.get("duration") or 6)
+    except (TypeError, ValueError):
+        duration = 6
+    resolution = str(args.get("resolution") or "1080P").strip() or "1080P"
+
+    payload: dict[str, Any] = {
+        "prompt": prompt,
+        "model": model,
+        "duration": duration,
+        "resolution": resolution,
+    }
+
+    if has_first:
+        try:
+            payload["first_frame_image"] = _ref_to_image_file(
+                str(first_frame), ctx,
+            )
+        except Exception as exc:
+            return (f"Error: invalid first_frame_image: {exc}", [])
+    if has_last:
+        try:
+            payload["last_frame_image"] = _ref_to_image_file(
+                str(last_frame), ctx,
+            )
+        except Exception as exc:
+            return (f"Error: invalid last_frame_image: {exc}", [])
+    if has_subject:
+        try:
+            subj_value = _ref_to_image_file(str(subject_ref), ctx)
+        except Exception as exc:
+            return (f"Error: invalid subject_reference: {exc}", [])
+        payload["subject_reference"] = [
+            {"type": "character", "image": [subj_value]},
+        ]
+
+    # --- 1. Create task ---
+    create_url = f"{ctx.api_base}/v1/video_generation"
+    try:
+        async with httpx.AsyncClient(timeout=ctx.http_timeout) as client:
+            r = await client.post(
+                create_url,
+                headers=_auth_headers(ctx.api_key, json_body=True),
+                json=payload,
+            )
+    except Exception as exc:
+        return (f"Error: video_generation request failed: {exc}", [])
+    if r.status_code >= 400:
+        return (f"Error: video_generation {r.status_code}: {r.text[:400]}", [])
+    try:
+        create_body = r.json()
+    except Exception as exc:
+        return (f"Error: unparseable video_generation response: {exc}", [])
+    # video_generation's response does not always include base_resp, but
+    # when it does we surface the error.  task_id is the authoritative
+    # success signal.
+    task_id = create_body.get("task_id")
+    if not task_id:
+        ok, msg = _base_resp_ok(create_body)
+        return (
+            f"Error: video_generation returned no task_id "
+            f"({msg or create_body})",
+            [],
+        )
+
+    # --- 2. Poll ---
+    try:
+        file_id = await _mm_poll_video_task(ctx, str(task_id))
+    except Exception as exc:
+        return (f"Error: video task failed: {exc}", [])
+
+    # --- 3. Retrieve download URL + download the bytes ---
+    try:
+        download_url = await _mm_get_file_download_url(ctx, file_id)
+    except Exception as exc:
+        return (f"Error: could not retrieve video download URL: {exc}", [])
+
+    try:
+        async with httpx.AsyncClient(timeout=ctx.http_timeout) as client:
+            vr = await client.get(download_url)
+            vr.raise_for_status()
+            video_bytes = vr.content
+    except Exception as exc:
+        return (f"Error: video download failed: {exc}", [])
+    if not video_bytes:
+        return ("Error: downloaded video was empty.", [])
+
+    ctx.output_dir.mkdir(parents=True, exist_ok=True)
+    fname = f"minimax_video_{uuid.uuid4().hex[:10]}.mp4"
+    out_path = ctx.output_dir / fname
+    out_path.write_bytes(video_bytes)
+    pf_dict = ctx.pfm.resolve(str(out_path.resolve()))
+    if pf_dict is None:
+        return ("Error: failed to register generated video as a ProxyFile.", [])
+
+    # Mode label for the LLM-facing summary.
+    if has_subject:
+        kind = "subject-reference video"
+    elif has_last:
+        kind = "first-last-frame video"
+    elif has_first:
+        kind = "image-to-video"
+    else:
+        kind = "text-to-video"
+    summary = (
+        f"Generated {kind} with {model} at {resolution}, {duration}s "
+        f"({len(video_bytes)} bytes): {fname}"
     )
     return (summary, [ProxyFile(**pf_dict)])
