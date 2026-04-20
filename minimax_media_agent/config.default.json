@@ -9,6 +9,7 @@
     "SPEECH_POLL_INTERVAL": 3,
     "SPEECH_MAX_WAIT": 600,
     "MUSIC_MODEL": "music-2.6",
+    "MUSIC_MAX_WAIT": 300,
     "VIDEO_MODEL": "MiniMax-Hailuo-2.3",
     "VIDEO_POLL_INTERVAL": 10,
     "VIDEO_MAX_WAIT": 1800,

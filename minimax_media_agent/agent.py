@@ -80,6 +80,7 @@ SPEECH_MODEL: str = "speech-2.8-hd"
 SPEECH_POLL_INTERVAL: float = 3.0
 SPEECH_MAX_WAIT: float = 600.0
 MUSIC_MODEL: str = "music-2.6"
+MUSIC_MAX_WAIT: float = 300.0
 VIDEO_MODEL: str = "MiniMax-Hailuo-2.3"
 VIDEO_POLL_INTERVAL: float = 10.0
 VIDEO_MAX_WAIT: float = 1800.0
@@ -100,7 +101,8 @@ _INBOX_BASE: Path = _AGENT_DIR / "data" / "inboxes"
 def _refresh_config() -> None:
     global MINIMAX_API_KEY, MINIMAX_API_BASE, LLM_MODEL, LLM_MAX_TOKENS
     global LLM_TEMPERATURE, IMAGE_MODEL, SPEECH_MODEL
-    global SPEECH_POLL_INTERVAL, SPEECH_MAX_WAIT, MUSIC_MODEL, OUTPUT_DIR
+    global SPEECH_POLL_INTERVAL, SPEECH_MAX_WAIT, MUSIC_MODEL, MUSIC_MAX_WAIT
+    global OUTPUT_DIR
     global VIDEO_MODEL, VIDEO_POLL_INTERVAL, VIDEO_MAX_WAIT
     global AGENT_TIMEOUT, HTTP_TIMEOUT, MAX_ITERATIONS, MAX_TOOL_CALLS
     global ALLOWED_USER_IDS
@@ -118,6 +120,7 @@ def _refresh_config() -> None:
     SPEECH_POLL_INTERVAL = _sf(cfg.get("SPEECH_POLL_INTERVAL"), 3.0)
     SPEECH_MAX_WAIT = _sf(cfg.get("SPEECH_MAX_WAIT"), 600.0)
     MUSIC_MODEL = _s(cfg.get("MUSIC_MODEL"), "music-2.6")
+    MUSIC_MAX_WAIT = _sf(cfg.get("MUSIC_MAX_WAIT"), 300.0)
     VIDEO_MODEL = _s(cfg.get("VIDEO_MODEL"), "MiniMax-Hailuo-2.3")
     VIDEO_POLL_INTERVAL = _sf(cfg.get("VIDEO_POLL_INTERVAL"), 10.0)
     VIDEO_MAX_WAIT = _sf(cfg.get("VIDEO_MAX_WAIT"), 1800.0)
@@ -536,6 +539,7 @@ async def _run(data: dict[str, Any]) -> dict[str, Any]:
         pfm=pfm,
         speech_poll_interval=SPEECH_POLL_INTERVAL,
         speech_max_wait=SPEECH_MAX_WAIT,
+        music_max_wait=MUSIC_MAX_WAIT,
         video_poll_interval=VIDEO_POLL_INTERVAL,
         video_max_wait=VIDEO_MAX_WAIT,
         ref_map=ref_map,

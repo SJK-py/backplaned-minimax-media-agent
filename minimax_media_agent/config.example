@@ -9,6 +9,7 @@
   "SPEECH_POLL_INTERVAL": "Seconds between polls of the async T2A task status (default: 3)",
   "SPEECH_MAX_WAIT": "Maximum seconds to wait for an async T2A task to complete before giving up (default: 600 = 10 minutes)",
   "MUSIC_MODEL": "Default MiniMax music model. Options: music-2.6 (default, paid tier, higher RPM), music-2.6-free (free tier, lower RPM), music-cover (paid tier, cover generation), music-cover-free (free tier cover). The LLM may override per call via the tool's `model` parameter. Use the -free variants if your API key is not on a paid plan.",
+  "MUSIC_MAX_WAIT": "Maximum seconds for a single music_generation HTTP call (default: 300 = 5 minutes). Music generation is synchronous and commonly takes 30-120 s, so a longer budget than HTTP_TIMEOUT is needed.",
   "VIDEO_MODEL": "Default MiniMax video model used for text-to-video and image-to-video. Options include MiniMax-Hailuo-2.3 (default), MiniMax-Hailuo-02 (used automatically for first-last-frame mode), S2V-01 (used automatically for subject-reference mode). The LLM may override per call via the tool's `model` parameter.",
   "VIDEO_POLL_INTERVAL": "Seconds between polls of the video_generation task status (default: 10). MiniMax recommends 10s to avoid unnecessary server load.",
   "VIDEO_MAX_WAIT": "Maximum seconds to wait for a video task to complete before giving up (default: 1800 = 30 minutes). Video generation is much slower than audio.",

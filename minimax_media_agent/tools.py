@@ -65,6 +65,11 @@ class ToolContext:
     # Speech-specific: long audio tasks are asynchronous.
     speech_poll_interval: float = 3.0
     speech_max_wait: float = 600.0
+    # Music-specific: the music API is synchronous, so the entire
+    # generation happens inside a single HTTP call that commonly runs
+    # 30-120 seconds.  HTTP_TIMEOUT (for one-shot REST calls) is too
+    # short; use this dedicated budget instead.
+    music_max_wait: float = 300.0
     # Video-specific: tasks take minutes, poll slower, wait longer.
     video_poll_interval: float = 10.0
     video_max_wait: float = 1800.0
@@ -1352,10 +1357,18 @@ async def _generate_music(
                 [],
             )
 
+    # The schema says audio_setting's sub-fields are optional, but the
+    # working doc example always populates all three.  Send explicit
+    # defaults for robustness; the tool still only accepts `format` from
+    # the LLM (sample_rate / bitrate are not worth exposing).
     payload: dict[str, Any] = {
         "model": model,
         "output_format": "hex",
-        "audio_setting": {"format": fmt},
+        "audio_setting": {
+            "sample_rate": 44100,
+            "bitrate": 256000,
+            "format": fmt,
+        },
     }
     if prompt:
         payload["prompt"] = prompt
@@ -1372,14 +1385,24 @@ async def _generate_music(
             return (f"Error: {exc}", [])
         payload[field_name] = value
 
+    # Music generation is a synchronous blocking call that often takes
+    # 30-120 s; use the dedicated music_max_wait budget rather than
+    # HTTP_TIMEOUT (which is sized for one-shot REST calls).
     url = f"{ctx.api_base}/v1/music_generation"
     try:
-        async with httpx.AsyncClient(timeout=ctx.http_timeout) as client:
+        async with httpx.AsyncClient(timeout=ctx.music_max_wait) as client:
             r = await client.post(
                 url,
                 headers=_auth_headers(ctx.api_key, json_body=True),
                 json=payload,
             )
+    except httpx.TimeoutException:
+        return (
+            f"Error: music_generation timed out after "
+            f"{ctx.music_max_wait:.0f}s. Music can take a few minutes; "
+            "raise MUSIC_MAX_WAIT in config if this keeps happening.",
+            [],
+        )
     except Exception as exc:
         return (f"Error: music_generation request failed: {exc}", [])
     if r.status_code >= 400:
