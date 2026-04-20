@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+
+# Runtime state: runtime config.json (contains MINIMAX_API_KEY), per-task
+# inboxes, generated media output.  Only config.default.json and
+# config.example are tracked.
+minimax_media_agent/data/
