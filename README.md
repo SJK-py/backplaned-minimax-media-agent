@@ -96,6 +96,65 @@ Edit `agents/minimax_media_agent/data/config.json` (or via the web-admin UI's co
 
 Config is re-read on every request, so edits via the web-admin UI take effect without restart.
 
+## Timeout coordination with Backplaned
+
+Media generation — especially video — can take longer than Backplaned's default per-layer timeouts. The full cascade from user request to this agent's generation call is:
+
+| Layer | Setting | Backplaned default | Scope |
+|---|---|---|---|
+| Router HTTP-to-agent | `EMBEDDED_AGENT_TIMEOUT` (env var) | 300 s | Per agent call |
+| Router whole task | `GLOBAL_TIMEOUT_HOURS` (env var) | 1 h | Whole task tree |
+| core_personal_agent overall loop | `CORE_AGENT_TIMEOUT` (config.json) | 290 s | LLM loop |
+| core_personal_agent per-tool | `CORE_TOOL_TIMEOUT` (config.json) | 240 s | Each sub-agent call |
+| minimax_media_agent music | `MUSIC_MAX_WAIT` | 300 s | Synchronous music HTTP |
+| minimax_media_agent video | `VIDEO_MAX_WAIT` | 1800 s | Async video poll cap |
+
+**This agent will exceed the stock defaults for video every time, and can exceed them for music.** The innermost timeout always wins, so if you don't raise the upstream ones, the router / core agent will kill the request before MiniMax finishes the job.
+
+### Suggested values
+
+For a deployment that uses **music + video** end-to-end from a `core_personal_agent` chat:
+
+```jsonc
+// agents/core_personal_agent/data/config.json
+{
+  "CORE_TOOL_TIMEOUT": 1900,   // ≥ VIDEO_MAX_WAIT + small buffer
+  "CORE_AGENT_TIMEOUT": 2000   // ≥ CORE_TOOL_TIMEOUT
+}
+```
+
+Router `EMBEDDED_AGENT_TIMEOUT`:
+
+- **Bare-metal:** set `EMBEDDED_AGENT_TIMEOUT=1900` in the router's environment (e.g. in `start.config` or a systemd unit) before starting.
+- **Docker:** uncomment the optional line in `docker/docker-compose.yml` and raise the default:
+
+  ```yaml
+  services:
+    router:
+      environment:
+        - EMBEDDED_AGENT_TIMEOUT=${EMBEDDED_AGENT_TIMEOUT:-1900}
+  ```
+
+`GLOBAL_TIMEOUT_HOURS` default (1 h) comfortably accommodates a single 30-minute video, so usually no change needed there.
+
+### If you only use music
+
+Bump to ~400 s everywhere instead (`MUSIC_MAX_WAIT` is 300, so 400 leaves headroom):
+
+```jsonc
+// agents/core_personal_agent/data/config.json
+{ "CORE_TOOL_TIMEOUT": 400, "CORE_AGENT_TIMEOUT": 500 }
+```
+
+```yaml
+# docker-compose.yml
+- EMBEDDED_AGENT_TIMEOUT=${EMBEDDED_AGENT_TIMEOUT:-400}
+```
+
+### If the upstream timeouts are fixed
+
+If you can't change core / router settings, cap this agent instead — set `VIDEO_MAX_WAIT` (and/or `MUSIC_MAX_WAIT`) **below** the smallest upstream timeout. The tool will error with a clear "timed out after Ns — raise MUSIC_MAX_WAIT / VIDEO_MAX_WAIT" message instead of the router cutting the connection mid-flight.
+
 ## Access control
 
 MiniMax's media APIs are billed per call, so this agent is **deny-by-default**. A request is accepted only if `user_id` is present in the payload **and** matches an entry in `ALLOWED_USER_IDS`.
