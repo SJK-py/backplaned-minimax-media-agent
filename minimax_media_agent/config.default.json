@@ -1,0 +1,13 @@
+{
+    "MINIMAX_API_KEY": "",
+    "MINIMAX_API_BASE": "https://api.minimax.io",
+    "LLM_MODEL": "MiniMax-M2.7",
+    "LLM_MAX_TOKENS": 4096,
+    "LLM_TEMPERATURE": 1.0,
+    "IMAGE_MODEL": "image-01",
+    "OUTPUT_DIR": "",
+    "AGENT_TIMEOUT": 180,
+    "HTTP_TIMEOUT": 120,
+    "MAX_ITERATIONS": 6,
+    "MAX_TOOL_CALLS": 8
+}
