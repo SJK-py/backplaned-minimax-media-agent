@@ -412,19 +412,19 @@ MINIMAX_TOOLS: list[dict[str, Any]] = [
                     "type": "number",
                     "minimum": 0.5,
                     "maximum": 2.0,
-                    "description": "Speech rate multiplier. Default: 1.",
+                    "description": "Speech rate multiplier, 0.5-2.0. Default: 1.",
                 },
                 "vol": {
                     "type": "number",
-                    "minimum": 0,
+                    "exclusiveMinimum": 0,
                     "maximum": 10,
-                    "description": "Volume 0-10. Default: 1.",
+                    "description": "Volume, greater than 0 and up to 10. Default: 1.",
                 },
                 "pitch": {
-                    "type": "number",
+                    "type": "integer",
                     "minimum": -12,
                     "maximum": 12,
-                    "description": "Pitch shift in semitones (-12 to +12). Default: 0.",
+                    "description": "Pitch shift in semitones (integer, -12 to +12). Default: 0.",
                 },
                 "format": {
                     "type": "string",
@@ -1013,12 +1013,27 @@ async def _generate_speech(
     language_boost = str(args.get("language_boost") or "auto")
     fmt = str(args.get("format") or _SPEECH_DEFAULT_FORMAT).lower()
 
-    def _num(key: str, default: float) -> float:
+    # MiniMax's voice_setting schema:
+    #   speed : number, [0.5, 2.0]
+    #   vol   : number, (0, 10]      — exclusive zero
+    #   pitch : integer, [-12, 12]   — NOT a float; API returns 2013 otherwise
+    # Clamp silently: out-of-range values from the LLM would otherwise cause
+    # an "invalid parameter" reject from MiniMax mid-request.
+    def _clamp_float(key: str, default: float, lo: float, hi: float) -> float:
         v = args.get(key)
         try:
-            return float(v) if v is not None else default
+            n = float(v) if v is not None else default
         except (TypeError, ValueError):
             return default
+        return max(lo, min(hi, n))
+
+    def _clamp_int(key: str, default: int, lo: int, hi: int) -> int:
+        v = args.get(key)
+        try:
+            n = int(v) if v is not None else default
+        except (TypeError, ValueError):
+            return default
+        return max(lo, min(hi, n))
 
     payload: dict[str, Any] = {
         "model": model,
@@ -1026,9 +1041,10 @@ async def _generate_speech(
         "language_boost": language_boost,
         "voice_setting": {
             "voice_id": voice_id,
-            "speed": _num("speed", 1.0),
-            "vol": _num("vol", 1.0),
-            "pitch": _num("pitch", 0.0),
+            "speed": _clamp_float("speed", 1.0, 0.5, 2.0),
+            # vol's lower bound is exclusive zero — use a small positive floor.
+            "vol": _clamp_float("vol", 1.0, 0.01, 10.0),
+            "pitch": _clamp_int("pitch", 0, -12, 12),
         },
         "audio_setting": {
             "audio_sample_rate": _SPEECH_DEFAULT_SAMPLE_RATE,
