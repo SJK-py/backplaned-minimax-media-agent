@@ -428,8 +428,11 @@ MINIMAX_TOOLS: list[dict[str, Any]] = [
                 },
                 "format": {
                     "type": "string",
-                    "enum": ["mp3", "wav", "flac", "pcm"],
-                    "description": "Output audio format. Default: mp3.",
+                    "enum": ["mp3", "flac", "pcm"],
+                    "description": (
+                        "Output audio format. Default: mp3. "
+                        "(wav is not supported by the async T2A endpoint.)"
+                    ),
                 },
             },
             "required": ["text", "voice_id"],
@@ -986,11 +989,14 @@ _SPEECH_DEFAULT_CHANNEL: int = 2
 
 
 def _ext_for_format(fmt: str) -> str:
+    """Normalise a user-supplied speech format to an on-disk extension.
+
+    Async T2A's audio_setting.format enum is {mp3, flac, pcm} — wav is
+    specifically excluded by MiniMax for this endpoint.
+    """
     fmt = (fmt or "mp3").lower()
-    if fmt in ("mp3", "wav", "flac"):
+    if fmt in ("mp3", "flac", "pcm"):
         return fmt
-    if fmt == "pcm":
-        return "pcm"
     return "mp3"
 
 
@@ -1049,7 +1055,7 @@ async def _generate_speech(
         "audio_setting": {
             "audio_sample_rate": _SPEECH_DEFAULT_SAMPLE_RATE,
             "bitrate": _SPEECH_DEFAULT_BITRATE,
-            "format": fmt if fmt in ("mp3", "wav", "flac", "pcm") else "mp3",
+            "format": fmt if fmt in ("mp3", "flac", "pcm") else "mp3",
             "channel": _SPEECH_DEFAULT_CHANNEL,
         },
     }
