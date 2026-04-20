@@ -71,6 +71,12 @@ def _load_config() -> dict[str, Any]:
 
 # Module-level defaults — refreshed from config.json on every request.
 MINIMAX_API_KEY: str = ""
+# Optional secondary MiniMax API key.  If set, the tool dispatcher
+# automatically retries a failed tool call with this key when the failure
+# looks tier/permission/auth/balance related (typical use case: main key
+# is a Token Plan, backup is pay-as-you-go to cover APIs the Token Plan
+# can't reach).
+MINIMAX_BACKUP_API_KEY: str = ""
 MINIMAX_API_BASE: str = "https://api.minimax.io"
 LLM_MODEL: str = "MiniMax-M2.7"
 LLM_MAX_TOKENS: int = 4096
@@ -99,7 +105,8 @@ _INBOX_BASE: Path = _AGENT_DIR / "data" / "inboxes"
 
 
 def _refresh_config() -> None:
-    global MINIMAX_API_KEY, MINIMAX_API_BASE, LLM_MODEL, LLM_MAX_TOKENS
+    global MINIMAX_API_KEY, MINIMAX_BACKUP_API_KEY, MINIMAX_API_BASE
+    global LLM_MODEL, LLM_MAX_TOKENS
     global LLM_TEMPERATURE, IMAGE_MODEL, SPEECH_MODEL
     global SPEECH_POLL_INTERVAL, SPEECH_MAX_WAIT, MUSIC_MODEL, MUSIC_MAX_WAIT
     global OUTPUT_DIR
@@ -111,6 +118,7 @@ def _refresh_config() -> None:
     _si = lambda v, d: d if v is None or v == "" else int(v)
     _sf = lambda v, d: d if v is None or v == "" else float(v)
     MINIMAX_API_KEY = _s(cfg.get("MINIMAX_API_KEY"), "")
+    MINIMAX_BACKUP_API_KEY = _s(cfg.get("MINIMAX_BACKUP_API_KEY"), "")
     MINIMAX_API_BASE = _s(cfg.get("MINIMAX_API_BASE"), "https://api.minimax.io").rstrip("/")
     LLM_MODEL = _s(cfg.get("LLM_MODEL"), "MiniMax-M2.7")
     LLM_MAX_TOKENS = _si(cfg.get("LLM_MAX_TOKENS"), 4096)
@@ -529,6 +537,7 @@ async def _run(data: dict[str, Any]) -> dict[str, Any]:
     # ------------------------------------------------------------------
     ctx = ToolContext(
         api_key=MINIMAX_API_KEY,
+        backup_api_key=MINIMAX_BACKUP_API_KEY,
         api_base=MINIMAX_API_BASE,
         image_model=IMAGE_MODEL,
         speech_model=SPEECH_MODEL,

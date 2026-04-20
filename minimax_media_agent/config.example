@@ -1,5 +1,6 @@
 {
   "MINIMAX_API_KEY": "MiniMax Platform API key (required). Get one from https://platform.minimax.io/user-center/basic-information/interface-key",
+  "MINIMAX_BACKUP_API_KEY": "Optional secondary MiniMax API key. If set, any tool call whose error looks key/tier related (e.g. 'token plan not support model', 401/403, 'insufficient balance') is automatically retried with this key. Typical use: main key is a Token Plan, backup is a pay-as-you-go key to cover APIs the Token Plan can't reach. Blank = no fallback.",
   "MINIMAX_API_BASE": "Base URL for the MiniMax API. Global: https://api.minimax.io (default). Mainland China: https://api.minimaxi.com",
   "LLM_MODEL": "Model used for the planning / tool-loop LLM. Options: MiniMax-M2.7 (default), MiniMax-M2.7-highspeed, MiniMax-M2.5, MiniMax-M2.5-highspeed, MiniMax-M2.1, MiniMax-M2.1-highspeed, MiniMax-M2",
   "LLM_MAX_TOKENS": "Maximum tokens per LLM response (default: 4096)",

@@ -1,5 +1,6 @@
 {
     "MINIMAX_API_KEY": "",
+    "MINIMAX_BACKUP_API_KEY": "",
     "MINIMAX_API_BASE": "https://api.minimax.io",
     "LLM_MODEL": "MiniMax-M2.7",
     "LLM_MAX_TOKENS": 4096,

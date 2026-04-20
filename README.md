@@ -46,6 +46,7 @@ Edit `agents/minimax_media_agent/data/config.json` (or via the web-admin UI's co
 | Key | Default | Description |
 |---|---|---|
 | `MINIMAX_API_KEY` | `""` | MiniMax Platform API key. **Required.** Get one from <https://platform.minimax.io/user-center/basic-information/interface-key>. |
+| `MINIMAX_BACKUP_API_KEY` | `""` | Optional secondary API key used as fallback when the main key fails with a tier/permission/auth/balance error. See **Key fallback** below. |
 | `MINIMAX_API_BASE` | `https://api.minimax.io` | Global endpoint (use `https://api.minimaxi.com` for Mainland China). |
 | `LLM_MODEL` | `MiniMax-M2.7` | Model driving the tool-loop planner. Options: `MiniMax-M2.7`, `MiniMax-M2.7-highspeed`, `MiniMax-M2.5`, `MiniMax-M2.5-highspeed`, `MiniMax-M2.1`, `MiniMax-M2.1-highspeed`, `MiniMax-M2`. |
 | `LLM_MAX_TOKENS` | `4096` | Max tokens per LLM turn. |
@@ -55,6 +56,7 @@ Edit `agents/minimax_media_agent/data/config.json` (or via the web-admin UI's co
 | `SPEECH_POLL_INTERVAL` | `3` | Seconds between async T2A status polls. |
 | `SPEECH_MAX_WAIT` | `600` | Max seconds to wait for T2A completion. |
 | `MUSIC_MODEL` | `music-2.6` | Default music model. Use `music-2.6-free` for free-tier API keys; `music-cover[-free]` for covers. |
+| `MUSIC_MAX_WAIT` | `300` | Max seconds for a single (synchronous) music generation HTTP call. |
 | `VIDEO_MODEL` | `MiniMax-Hailuo-2.3` | Default text/image-to-video model. First-last-frame auto-switches to `MiniMax-Hailuo-02`; subject-reference to `S2V-01`. |
 | `VIDEO_POLL_INTERVAL` | `10` | Seconds between video-task status polls. |
 | `VIDEO_MAX_WAIT` | `1800` | Max seconds to wait for video completion. Videos take minutes. |
@@ -84,6 +86,27 @@ MiniMax's media APIs are billed per call, so this agent is **deny-by-default**. 
 `core_personal_agent` injects the session's `user_id` authoritatively whenever a destination agent's `input_schema` declares it, so normal conversation flow Just Works once the user is on the allowlist. Unknown callers get a `403` and a helpful error message telling the operator which file to edit.
 
 Denied calls never reach the MiniMax API — the check fires before any outbound work.
+
+## Key fallback
+
+Some MiniMax APIs are not available to every account tier — a Token Plan key may reject a model that the pay-as-you-go tier happily accepts, and vice versa. Set `MINIMAX_BACKUP_API_KEY` alongside `MINIMAX_API_KEY` and the agent will automatically retry the full tool call with the backup key when the main-key error looks tier-related:
+
+```json
+{
+  "MINIMAX_API_KEY": "sk-primary-token-plan-...",
+  "MINIMAX_BACKUP_API_KEY": "sk-backup-payg-..."
+}
+```
+
+Retry fires only on these signals in the error text (case-insensitive):
+
+- `"not support"` (matches MiniMax's `"token plan not support model"`)
+- `"token plan"` / `"pay-as-you-go"`
+- `"permission"`
+- `"insufficient balance"` (status 1008)
+- `" 401"` / `" 403"` / `"authentication failed"` / `"invalid api key"`
+
+Validation errors (HTTP 2013 "invalid input parameters") are **not** retried — no key change would fix them. If the backup key also fails retryably, the main-key error is returned with a note that the backup was tried, so the operator can see the primary cause.
 
 ## Tool details
 

@@ -62,6 +62,11 @@ class ToolContext:
     output_dir: Path
     http_timeout: float
     pfm: ProxyFileManager
+    # Optional pay-as-you-go / secondary MiniMax API key.  If the main
+    # api_key fails with an error that looks tier/permission-related
+    # (e.g. "token plan not support model"), execute_tool retries the
+    # full tool call with this key.  Blank = no fallback.
+    backup_api_key: str = ""
     # Speech-specific: long audio tasks are asynchronous.
     speech_poll_interval: float = 3.0
     speech_max_wait: float = 600.0
@@ -665,12 +670,17 @@ MINIMAX_TOOLS: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 
 
-async def execute_tool(
+async def _execute_tool_once(
     name: str,
     args: dict[str, Any],
     ctx: ToolContext,
 ) -> tuple[str, list[ProxyFile]]:
-    """Route a tool_use invocation to the matching executor."""
+    """Route a tool_use invocation to the matching executor.
+
+    Runs with whatever API key is currently set on ``ctx.api_key`` —
+    :func:`execute_tool` is the public entry point that handles
+    main/backup key fallback.
+    """
     if name == "generate_image":
         return await _generate_image(args, ctx)
     if name == "list_voices":
@@ -686,6 +696,79 @@ async def execute_tool(
     if name == "generate_video":
         return await _generate_video(args, ctx)
     return (f"Error: unknown tool '{name}'", [])
+
+
+# Substrings that, when found in a tool's error text, signal the failure
+# is key/tier/permission related and a different API key might succeed.
+# Match is case-insensitive.
+_BACKUP_KEY_RETRY_HINTS: tuple[str, ...] = (
+    "not support",          # "token plan not support model"
+    "token plan",           # Token Plan restrictions
+    "pay-as-you-go",        # explicit tier mention
+    "permission",           # generic permission denied
+    "insufficient balance", # 1008 on a depleted key
+    " 401",                 # Unauthorized
+    " 403",                 # Forbidden
+    "authentication failed",# 1004
+    "invalid api key",      # 2049
+)
+
+
+def _backup_key_should_help(result_text: str) -> bool:
+    """Return True if *result_text* looks like a failure that might be
+    resolved by switching to a different MiniMax API key."""
+    if not result_text.startswith("Error:"):
+        return False
+    low = result_text.lower()
+    return any(hint in low for hint in _BACKUP_KEY_RETRY_HINTS)
+
+
+async def execute_tool(
+    name: str,
+    args: dict[str, Any],
+    ctx: ToolContext,
+) -> tuple[str, list[ProxyFile]]:
+    """Run a tool with the main API key, falling back to the backup key
+    on retryable failures.
+
+    Retry is attempted only when:
+
+    - A backup key is configured (``ctx.backup_api_key`` is non-empty), and
+    - The main-key result text matches one of the
+      :data:`_BACKUP_KEY_RETRY_HINTS` substrings (tier/permission/auth/
+      balance errors — NOT validation errors like 2013 which no key can
+      fix).
+
+    If the backup also fails retryably, the original main-key error is
+    returned with a note that the backup was tried.
+    """
+    result_text, files = await _execute_tool_once(name, args, ctx)
+
+    if not ctx.backup_api_key or ctx.backup_api_key == ctx.api_key:
+        return result_text, files
+    if not _backup_key_should_help(result_text):
+        return result_text, files
+
+    logger.warning(
+        "Main MiniMax key failed '%s' (%s); retrying with backup key",
+        name, result_text[:160],
+    )
+    original_key = ctx.api_key
+    try:
+        ctx.api_key = ctx.backup_api_key
+        backup_text, backup_files = await _execute_tool_once(name, args, ctx)
+    finally:
+        ctx.api_key = original_key
+
+    if _backup_key_should_help(backup_text):
+        # Both keys rejected; surface the main error so the operator sees
+        # the primary cause, plus a hint that the backup was tried.
+        return (
+            f"{result_text} [Backup key also rejected the request: "
+            f"{backup_text}]",
+            [],
+        )
+    return backup_text, backup_files
 
 
 # ---------------------------------------------------------------------------
