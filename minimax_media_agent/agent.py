@@ -45,7 +45,10 @@ from helper import (
     build_result_request,
 )
 
-from tools import (
+# Namespaced module filename (`minimax_tools` rather than `tools`) to
+# avoid a sys.modules collision with other embedded agents that also
+# have a `tools.py` (e.g. web_agent). See minimax_tools.py docstring.
+from minimax_tools import (
     MINIMAX_TOOLS,
     ToolContext,
     execute_tool,

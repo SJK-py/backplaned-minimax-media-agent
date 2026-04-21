@@ -1,6 +1,13 @@
 """
-agents/minimax_media_agent/tools.py — MiniMax media-generation tool
-definitions and executors.
+agents/minimax_media_agent/minimax_tools.py — MiniMax media-generation
+tool definitions and executors.
+
+NOTE on the filename: Backplaned's embedded-agent loader puts each
+agent's own directory on ``sys.path``, so naming this module just
+``tools`` would collide with other agents (e.g. ``web_agent/tools.py``)
+that use the same generic name — whichever agent loaded first wins the
+``tools`` slot in ``sys.modules`` and the second import fails with
+``cannot import name ... from 'tools'``.  We namespace it instead.
 
 Tools shipped:
 
