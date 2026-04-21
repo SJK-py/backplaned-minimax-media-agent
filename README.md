@@ -276,7 +276,7 @@ Generated media survives the agent's response because the router reads the `loca
 ```
 minimax_media_agent/
 ├── agent.py             # FastAPI app + LLM tool loop
-├── tools.py             # 7 tool schemas + executors + MiniMax HTTP helpers
+├── minimax_tools.py     # 7 tool schemas + executors + MiniMax HTTP helpers (namespaced to avoid sys.modules clash with other agents' tools.py)
 ├── config.default.json  # Seed config
 └── config.example       # Field-description map consumed by the web-admin UI
 ```
