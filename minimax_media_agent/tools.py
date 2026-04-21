@@ -514,7 +514,7 @@ MINIMAX_TOOLS: list[dict[str, Any]] = [
             "the reference.\n\n"
             "Returns a single audio file attached as a ProxyFile. The "
             "'-free' models are available to all API key holders with "
-            "lower RPM; the paid variants have higher rate limits."
+            "lower RPM; try paid variants (non-free) first."
         ),
         "input_schema": {
             "type": "object",
