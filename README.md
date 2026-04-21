@@ -6,6 +6,10 @@ One agent, one tool-loop planner (MiniMax's Anthropic-compatible endpoint), seve
 
 No new dependencies — only `httpx` and `fastapi`, both already required by Backplaned itself.
 
+## Showcases
+
+![showcase_image](/showcase_image.gif) ![showcase_video](/showcase_video.gif)
+
 ## Capabilities
 
 | Tool | MiniMax endpoint | Modes |
